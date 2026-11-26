@@ -1,0 +1,18 @@
+{
+  "dist_pacman": -0.000272116731319157,
+  "dist_lead": -0.0029420353745212902,
+  "dist_blinky": 0.0005617013378040722,
+  "dist_pinky": 0.00040165878574782894,
+  "dist_inky": 0.0007029217851306621,
+  "dist_clyde": 0.0005803670004388316,
+  "dist_pacman_exit": -0.002154672029301258,
+  "reversal": -0.000164153362539578,
+  "dist_pacman_cornered": -4.067222478424082e-05,
+  "dist_lead_cornered": -0.00030023399935875293,
+  "dist_pacman_exit_cornered": -0.00026414558676463685,
+  "exit_coverage_margin": 2.4951031110632478e-05,
+  "uncovered_exit_count": -1.5783189536670316e-05,
+  "power_pellet_guard_distance": 4.2139921182145694e-19,
+  "frightened_remaining_fraction": 0.0,
+  "dist_pacman_urgency": -1.2911795641473108e-05
+}

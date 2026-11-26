@@ -1,0 +1,18 @@
+{
+  "dist_pacman": -1.0,
+  "dist_lead": 0.0,
+  "dist_blinky": 0.0,
+  "dist_pinky": 0.0,
+  "dist_inky": 0.0,
+  "dist_clyde": 0.0,
+  "dist_pacman_exit": -0.3,
+  "reversal": 0.0,
+  "dist_pacman_cornered": 0.0,
+  "dist_lead_cornered": 0.0,
+  "dist_pacman_exit_cornered": 0.0,
+  "exit_coverage_margin": 0.0,
+  "uncovered_exit_count": 0.0,
+  "power_pellet_guard_distance": 0.0,
+  "frightened_remaining_fraction": 0.0,
+  "dist_pacman_urgency": 0.0
+}

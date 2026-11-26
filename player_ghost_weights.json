@@ -1,0 +1,10 @@
+{
+  "dist_pacman": -0.000331852985212482,
+  "dist_lead": -0.003485472279103069,
+  "dist_ally": 0.0007003401846248213,
+  "dist_pacman_exit": -0.0026511507421237385,
+  "reversal": -0.00024708873250535527,
+  "dist_pacman_cornered": -5.619520886445582e-05,
+  "dist_lead_cornered": -0.00034505578657087905,
+  "dist_pacman_exit_cornered": -0.0002586352204406287
+}

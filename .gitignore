@@ -1,0 +1,32 @@
+# Recorded games and logs from real play (large, and personal gameplay data)
+pacman_history.jsonl
+pacman_decisions.jsonl
+player_ghost_moves.jsonl
+run_counter.txt
+replays/
+replays_archive_*/
+
+# Generated or local-only
+__pycache__/
+*.pyc
+checkpoints/
+evasion_cache/
+unsloth-tmp/
+.claude/
+.vscode/
+
+# Scratch and research leftovers
+_*.txt
+temp_ghost_pacman.txt
+weight_ablation_results.json
+weight_inertness_screen.json
+
+# Saved ghost models: only what the game loads by default (full_power + its moves table)
+# and the plain test ghosts; the other fitted copies stay local
+player_ghost_versions/*
+!player_ghost_versions/full_power.json
+!player_ghost_versions/full_power_hops.json
+!player_ghost_versions/claude_plus.json
+!player_ghost_versions/blinky_plus.json
+!player_ghost_versions/goose.json
+!player_ghost_versions/bad_goose.json
