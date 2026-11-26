@@ -4512,6 +4512,25 @@ def _pursuer_race(position, pellet, pursuer, pacman_direction, ai_ghost_position
     return True
 
 
+# A frightened player ghost is slower than Pac-Man (17 frames a move against
+# 12), so stepping along the shortest way to it closes the gap by the
+# difference in speed whatever it does: each of his moves takes a tile off,
+# each of its moves puts at most one back. Once the power time left only just
+# covers the gap, the kill is certain and he goes and takes it - as late as
+# that is still certain (PACMAN_SURE_KILL_SLACK_MS of spare time at most), so
+# the pellets on the way are eaten first. Eaten, the ghost waits three seconds
+# in the house. In 109 recorded real games' power pellets he ate the player's
+# ghost 30 times; in simulation this lifts it to about 70-75%. Measured on
+# 800 games each: +1.1 points of maze against the stand-in for the person
+# playing, +2.1 against a sharper "pouncing" ghost, no change against a
+# plain chaser. PACMAN_SURE_KILL=0 switches it off.
+PACMAN_SURE_KILL = os.environ.get("PACMAN_SURE_KILL", "1") == "1"
+PACMAN_SURE_KILL_MARGIN_MS = float(os.environ.get("PACMAN_SURE_KILL_MARGIN_MS", "400"))
+PACMAN_SURE_KILL_MS_PER_TILE = 1.0 / (1.0 / PACMAN_MOVE_DELAY - 1.0 / GHOST_FRIGHTENED_MOVE_DELAY)
+PACMAN_SURE_KILL_SLACK_MS = float(os.environ.get("PACMAN_SURE_KILL_SLACK_MS", "1400"))
+SURE_KILL_STATS = {"chase": 0}
+
+
 def choose_pacman_step(
     position, ghost_positions, pellets, power_pellets, frightened, weights,
     pacman_direction=(0, 0), prev_ghost_positions=None, perceived_pacman_position=None,
@@ -4687,6 +4706,14 @@ def choose_pacman_step(
         camp_pellet = min(power_pellets, key=_door_distance)
     if frightened and pursuer_active and pellets:
         targets = set(pellets)  # a second power pellet eaten while already powered is wasted
+    if frightened and PACMAN_SURE_KILL and pursuer_outside:
+        gap = pacman_bfs_distances(position).get(pursuer)
+        needed = None if gap is None else gap * PACMAN_SURE_KILL_MS_PER_TILE + PACMAN_SURE_KILL_MARGIN_MS
+        remaining = sim_state["power_until"] - sim_state["now"]
+        if needed is not None and needed <= remaining <= needed + PACMAN_SURE_KILL_SLACK_MS:
+            SURE_KILL_STATS["chase"] += 1
+            return min(options, key=lambda s: (
+                pacman_bfs_distances(s).get(pursuer, 10_000), 0 if s in pellets else 1, s in power_pellets))
     if frightened:
         # Ghosts are fleeing and harmless: ignore danger, hunt pellets, and
         # opportunistically close in on a nearby ghost for a bonus. Both

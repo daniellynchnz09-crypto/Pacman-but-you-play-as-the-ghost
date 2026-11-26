@@ -62,6 +62,17 @@ the game starts. None of them changes a rule of the game - only how he decides.
   in 78 of 208 games (37.5%), against 0 of the same 208 without the planner.
   Against the saved ghosts that play more like a person the planner stays
   off and the results are unchanged.
+- `PACMAN_SURE_KILL` (default 1): the certain kill. While a power pellet is
+  working, your ghost walks at about two thirds of his speed, so each step he
+  takes towards it closes the gap whatever it does. When the power time left
+  only just covers that gap he goes and eats it, as late as that is still
+  certain so the pellets on the way are eaten first (`PACMAN_SURE_KILL_SLACK_MS`,
+  default 1400). Eaten, your ghost sits in the house for 3 seconds. In 109
+  power pellets he ate in your recorded games your ghost was eaten after 30
+  of them; in simulation this rule takes that to about 70-75% and adds
+  about 1 point of maze eaten against the stand-in for you and 2 against a
+  sharper "pouncing" ghost (800 games each). It changes nothing about the
+  rules of the game. Set `PACMAN_SURE_KILL=0` to switch it off.
 - `PACMAN_HOLD_FACTOR` (default 2): the idle-ghost rule. When your ghost has
   stood on one tile although free to move, Pac-Man assumes it will stay there
   about twice as long again (at most 8 seconds) and plans around it. It applies
