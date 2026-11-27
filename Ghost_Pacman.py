@@ -5629,6 +5629,59 @@ PACMAN_CLOUD_WEIGHT = float(os.environ.get("PACMAN_CLOUD_WEIGHT", "1200"))
 # ways are marked 1 alike; measured +0.5 points better than that against the stand-in, no worse elsewhere).
 PACMAN_CLOUD_LASTING = os.environ.get("PACMAN_CLOUD_LASTING", "1") == "1"
 _CLOUD_MARKS = {"at": None, "risk": None}  # the marks for the decision in hand: his tile, {way: risk}
+# Pincers: the room he is left with (PACMAN_CLOUD_ROOM). The marks above only count the ghosts of the cloud that
+# catch him WITHIN the search's 12 moves. Taken apart (99 catches in 100 simulated games against a person-like
+# ghost), 79 came from two sides at once, 71 of them the player's ghost on one and a classic ghost on the other;
+# he took the way the marks liked best almost every time; and the marks saw the end only once it was inside
+# their 12 moves - 8 moves before it his best way already lost half the cloud or more in 61% of the catches,
+# 20 moves before it that way still looked nearly free (under a tenth) in 79%. What does show it coming is his
+# room: the tiles he would reach before any ghost that is out, each at its own speed. In the player's recorded
+# games (11,338 of his decisions without power, 43 games) the chance that he is caught within his next 20 moves
+# is 1 to 2% with 40 tiles of room or more, 6% with 20-29, 32% with 10-14, 55% with 5-9 and 87% with under 5 -
+# whatever the distance to the player's ghost, which on its own says almost nothing (11-13% from 0 to 9 tiles).
+# (Scoring each way by the room of his very next tile was tried long ago and is off - see PURSUER_ROOM_WEIGHT:
+# neighbouring tiles have nearly the same room. Twelve moves on, the lines differ.)
+# So each line of the search also carries the danger of where it leaves him: for every ghost of the cloud still
+# after him, the chance above for the room he has against it and the classic ghosts where the line ends. A way's
+# mark is the share caught on the way plus PACMAN_CLOUD_ROOM times that, on the line where the two are least.
+# 0 switches it off.
+# Measured on the same simulated games with and without it, points of maze gained:
+#   the person-like stand-in, by the weight on the room: 0.5 +2.7 (100 games), 1 +1.5 (300), 2 +2.9 (281 games:
+#   66.3% -> 69.2%, z 2.2, caught after a median 85 s against 79 s), 4 +1.3 (300). A gain of about 2 points at any
+#   weight; nothing says 2 is truly better than 1 or 4.
+#   the "pouncing" ghost, weight 2: -0.6 (300 games, z -0.6); the older stand-in: -0.5 (300 games, z -0.4). No real change.
+# Letting the same danger also choose which lines the search keeps (every 4th move of a line) was no better
+# (+2.1 against +2.9, 300 games) and is not in the game.
+PACMAN_CLOUD_ROOM = float(os.environ.get("PACMAN_CLOUD_ROOM", "2"))
+# The chance of being caught within his next 20 moves by tiles of room, 0 to 60 (60: or more); from the recorded
+# games, made to fall steadily.
+_CLOUD_ROOM_DANGER = (
+    (1.00, 1.00, 0.95, 0.86, 0.84, 0.69, 0.68, 0.61, 0.40, 0.40, 0.40, 0.32, 0.32, 0.30, 0.28, 0.16, 0.12, 0.08, 0.08,
+     0.08, 0.08) + (0.06,) * 9 + (0.05,) * 5 + (0.04,) * 3 + (0.02,) * 16 + (0.01,) * 7
+)
+# Learning from the games as they are played (PACMAN_CLOUD_LEARN). The odds file is a picture of the player as
+# they were when it was fitted; people change (this player's style did, between the first 98 recorded games and
+# the later ones). So after every game the moves the player's ghost made in it are used to move the weights of
+# the odds: one Newton step, starting from how firmly the recorded games pin each weight down (the "certainty"
+# saved with the odds file) - the same sum as fitting the file again with the new game added. What is learned is
+# kept in PACMAN_CLOUD_LEARN_FILE (inside player_ghost_versions/; delete it to go back to the file as fitted).
+# Measured on the recorded games, in the order they were played:
+#   - odds fitted on the first 98 games only (the old style), read over the 71 later games: the average surprise
+#     at the player's moves (log-loss) 0.2755 without learning, 0.2672 with it - 0.2732 against 0.2774 over the
+#     first third of them, 0.2692 against 0.2821 over the last. Odds fitted on games of both periods: 0.2631.
+#     So about two thirds of what a stale picture loses comes back, most of it after the first twenty-odd games.
+#   - odds that are already up to date: nothing either way (0.2636 against 0.2631).
+#   - changing the odds WITHIN a game (after every move; one sharpness, gains on groups of inputs, shifts on the
+#     main inputs): no gain (0.2627 to 0.2691 against 0.2631). One game does not hold enough of the player's
+#     moves to learn from, so nothing changes in the middle of a game.
+# In play (100 simulated games against the person-like stand-in, each search process learning from its own
+# games): 69.0% of the maze against 69.5% without - no change, as expected of odds that were not stale.
+# "1": learn from games steered by a person; "all": from any ghost (tests); "0": off.
+PACMAN_CLOUD_LEARN = os.environ.get("PACMAN_CLOUD_LEARN", "1")
+# How much the games the file was fitted on count against a new one: 1 as much as each other, 0.5 half as much.
+PACMAN_CLOUD_LEARN_TRUST = float(os.environ.get("PACMAN_CLOUD_LEARN_TRUST", "0.5"))
+PACMAN_CLOUD_LEARN_FILE = os.environ.get("PACMAN_CLOUD_LEARN_FILE", "timed_odds_learned.json")  # "": kept in memory only
+PACMAN_CLOUD_LEARN_MIN = 30  # a game with fewer of the ghost's moves than this teaches nothing
 
 _CLOUD_BUCKET = (0, 1, 2, 3, 4, 4, 5, 5, 5, 5, 6)  # how "moves since" is grouped: 0, 1, 2, 3, 4-5, 6-9, 10 or more
 # one ghost of the cloud, as a row of whole numbers
@@ -5715,21 +5768,79 @@ def _cloud_observe(game, now, chosen):
     track = getattr(game, "_cloud_track", None)
     if track is None:
         track = game._cloud_track = _CloudTrack()
+    planner = _planner()
+    if PACMAN_CLOUD_LEARN != "0":
+        row = _cloud_row(
+            planner, track, game.ghost_position, game.ghost_direction, chosen, game.pacman_position,
+            game.pacman_direction, now - game.start_time, game.power_until - now,
+        )
+        if row is not None:
+            seen = getattr(game, "_cloud_seen", None)
+            if seen is None:
+                seen = game._cloud_seen = []
+            seen.append(row)
     track.observe(
-        _planner(), game.ghost_position, game.ghost_direction, chosen, game.pacman_position, game.pacman_direction,
+        planner, game.ghost_position, game.ghost_direction, chosen, game.pacman_position, game.pacman_direction,
         now - game.start_time,
     )
+
+
+def _cloud_row(planner, track, ghost, direction, chosen, pacman, pacman_direction, t_ms, power_left_ms):
+    """One move of the player's ghost as the timed-odds model sees it, for
+    learning from afterwards (see _Cloud.learn): what _Cloud.scores is given
+    for that move, then the way taken. `track` as it stood before the move."""
+    dirs = _CLOUD_DIR_INDEX
+    tile, pac = planner.idx.get(tuple(ghost)), planner.idx.get(tuple(pacman))
+    way = dirs.get(tuple(chosen), 4)
+    if tile is None or pac is None or way == 4:
+        return None
+    pd = dirs.get(tuple(pacman_direction), 4)
+    spr, spt = track.spr, track.spt
+    if track.lpd != 5 and pd != track.lpd and pd != 4:
+        spt = 0
+        if pd == _CLOUD_OPPOSITE[track.lpd]:
+            spr = 0
+    q, qd = (track.h2[0], track.h2[1]) if t_ms - track.h2[2] < 800 else (pac, pd)
+    frightened = power_left_ms > 0
+    share = max(0.0, min(1.0, power_left_ms / float(POWER_DURATION))) if frightened else 0.0
+    return (tile, dirs.get(tuple(direction), 4), pac, pd, q, qd, int(frightened), share,
+            spr, spt, track.sor, track.sot, track.away, track.two, way)
+
+
+def _cloud_flush(game):
+    """The game is over (or is being started again): what the player's ghost
+    did in it goes to the odds to learn from (see PACMAN_CLOUD_LEARN). In a
+    real game the search process does the sum; a headless test does it here."""
+    rows = getattr(game, "_cloud_seen", None)
+    game._cloud_seen = None
+    if not rows or len(rows) < PACMAN_CLOUD_LEARN_MIN or not (PACMAN_PLANNER and PACMAN_CLOUD) or PACMAN_CLOUD_LEARN == "0":
+        return
+    if PACMAN_CLOUD_LEARN != "all" and (game.ghost_autoplay_weights is not None or not game._plan_live):
+        return
+    try:
+        worker = game._plan_worker
+        if worker is not None:
+            worker.tell(("learn", PACMAN_CLOUD_MODEL, rows))
+        elif not game._plan_live:
+            model = _planner().cloud_model(PACMAN_CLOUD_MODEL)
+            if model is not None:
+                model.cloud = model.cloud.built()
+                model.cloud.learn(rows)
+    except Exception as exc:
+        if not game._plan_live:
+            raise
+        print("Could not learn from this game (%r); the odds stay as they were." % (exc,), file=sys.stderr)
 
 
 class _CloudLater(object):
     """A _Cloud not yet built: its tables take a few seconds, and in a real
     game only the search process ever needs them."""
 
-    def __init__(self, planner, weights):
-        self.planner, self.weights = planner, weights
+    def __init__(self, planner, weights, learn=None):
+        self.planner, self.weights, self.learn_from = planner, weights, learn
 
     def built(self):
-        return _Cloud(self.planner, self.weights)
+        return _Cloud(self.planner, self.weights, self.learn_from)
 
 
 class _Cloud(object):
@@ -5738,14 +5849,13 @@ class _Cloud(object):
     (compared on every recorded move of the player: see the scratch check
     cloudcheck.py - change either and the comparison has to be run again)."""
 
-    def __init__(self, planner, weights):
+    def __init__(self, planner, weights, learn=None):
         import numpy as np
         self.np = np
         self.planner = planner
         N = self.N = planner.N
         XY = planner.tiles
         idx = planner.idx
-        w = self.w = lambda name: float(weights.get(name, 0.0))
         self.CX = np.array([t[0] for t in XY], dtype=np.int64)
         self.CY = np.array([t[1] for t in XY], dtype=np.int64)
         self.DX = np.array([way[0] for way in CARDINALS] + [0, 0], dtype=np.int64)
@@ -5817,18 +5927,158 @@ class _Cloud(object):
         self.GDm = np.array(planner.GD, dtype=np.int64)
         wc = planner.worst_case()
         self.WCm = None if wc is None else np.array(wc, dtype=np.int64)
+        self.WAYS4 = np.arange(4, dtype=np.int64)[None, :]
+        self.DXW = self.DX[:4][None, :]
+        self.DYW = self.DY[:4][None, :]
+        self.GH_MS, self.PAC_MS = GHOST_MOVE_DELAY, PACMAN_MOVE_DELAY
+        self.DANGER = np.array(_CLOUD_ROOM_DANGER, dtype=float)
+        self.set_weights(weights)
+        self.learning = None
+        if learn is not None and PACMAN_CLOUD_LEARN != "0":
+            self._learn_setup(learn)
+
+    def built(self):
+        return self
+
+    def set_weights(self, weights):
+        """The weights of the odds: {input name: weight on the input as it comes}."""
+        np = self.np
+        w = self.w = lambda name: float(weights.get(name, 0.0))
         names = lambda stem: np.array([w("%s_%d" % (stem, k)) for k in range(7)])
         self.W_U_PR, self.W_U_OR, self.W_U_PT = names("u_since_pac_rev"), names("u_since_own_rev"), names("u_since_pac_turn")
         self.W_T, self.W_S = names("t_nearest_pac_turn"), names("s_since_own_turn")
         self.W_U_AWAY = np.array([w("u_nearer_away0"), w("u_nearer_away1"), w("u_nearer_away2"), w("u_nearer_away3plus")])
         self.W_S_AWAY = np.array([w("s_away_run1"), w("s_away_run2"), w("s_away_run3plus")])
-        self.WAYS4 = np.arange(4, dtype=np.int64)[None, :]
-        self.DXW = self.DX[:4][None, :]
-        self.DYW = self.DY[:4][None, :]
-        self.GH_MS, self.PAC_MS = GHOST_MOVE_DELAY, PACMAN_MOVE_DELAY
 
-    def built(self):
-        return self
+    # ---- learning from the games as they are played (see PACMAN_CLOUD_LEARN) ----
+    def _learn_setup(self, learn):
+        """`learn`: what the odds file says of its own fit - the inputs that
+        carry a weight, their scales, the weights on the scaled inputs and
+        the fit's curvature. Picks up what earlier games have taught, if the
+        file kept for that belongs to these very odds."""
+        np = self.np
+        names = list(learn["names"])
+        m = len(names)
+        upper = learn["upper"]
+        if len(upper) != m * (m + 1) // 2:
+            return
+        H = np.zeros((m, m))
+        H[np.triu_indices(m)] = upper
+        H = H + H.T - np.diag(np.diag(H))
+        state = {
+            "names": names, "scale": np.array(learn["scale"], dtype=float), "base": learn["base"],
+            "v": np.array(learn["weights"], dtype=float),
+            "prec": PACMAN_CLOUD_LEARN_TRUST * H + 1e-3 * np.eye(m),
+            "games": 0, "moves": 0, "path": None, "last": None,
+        }
+        if PACMAN_CLOUD_LEARN_FILE:
+            state["path"] = os.path.join(PLAYER_GHOST_VERSIONS_DIR, PACMAN_CLOUD_LEARN_FILE)
+            try:
+                with open(state["path"]) as handle:
+                    kept = json.load(handle)
+                if (kept.get("base") == state["base"] and kept.get("names") == names
+                        and kept.get("trust") == PACMAN_CLOUD_LEARN_TRUST and len(kept["prec_upper"]) == len(upper)):
+                    P = np.zeros((m, m))
+                    P[np.triu_indices(m)] = kept["prec_upper"]
+                    v = np.array(kept["weights"], dtype=float)
+                    if v.shape == (m,) and np.isfinite(v).all() and np.isfinite(P).all():
+                        state["v"], state["prec"] = v, P + P.T - np.diag(np.diag(P))
+                        state["games"], state["moves"] = int(kept.get("games", 0)), int(kept.get("moves", 0))
+            except (OSError, ValueError, KeyError, TypeError):
+                pass  # none kept yet, or not for these odds: start from the file as fitted
+        self.learning = state
+        self.set_weights({n: v / s for n, v, s in zip(names, state["v"], state["scale"])})
+
+    def learn(self, rows):
+        """One finished game's moves of the player's ghost (_cloud_row): the
+        weights of the odds take one Newton step towards making those moves
+        likelier, held back by everything learned before. Returns the mean
+        surprise (log-loss) at the game's moves before the step, or None when
+        nothing was learned."""
+        state = self.learning
+        if state is None or not rows:
+            return None
+        np = self.np
+        a = np.array([r[:7] + r[8:] for r in rows], dtype=np.int64)
+        share = np.array([r[7] for r in rows], dtype=float)
+        args = (a[:, 0], a[:, 1], a[:, 2], a[:, 3], a[:, 4], a[:, 5], a[:, 6] == 1, share,
+                a[:, 7], a[:, 8], a[:, 9], a[:, 10], a[:, 11], a[:, 12])
+        chosen = a[:, 13]
+        names, scale = state["names"], state["scale"]
+        n, m = len(rows), len(names)
+        D = np.zeros((n, 4, m))
+        valid = None
+        try:
+            # each input's part of the scores, by giving that input alone a weight of one (the scores are a
+            # plain sum over the inputs, so this is exact)
+            for k, name in enumerate(names):
+                self.set_weights({name: 1.0})
+                S, valid, _could, _closer = self.scores(*args)
+                D[:, :, k] = S / scale[k]
+        finally:
+            self.set_weights({nm: v / s for nm, v, s in zip(names, state["v"], scale)})
+        keep = (valid.sum(axis=1) >= 2) & valid[np.arange(n), chosen]
+        if int(keep.sum()) < PACMAN_CLOUD_LEARN_MIN:
+            return None
+        d = (D * valid[:, :, None])[keep]
+        ok, took = valid[keep], chosen[keep]
+        n = len(took)
+        s = np.where(ok, d.dot(state["v"]), -1e18)
+        p = np.exp(s - s.max(axis=1, keepdims=True)) * ok
+        p /= p.sum(axis=1, keepdims=True)
+        loss = float(-np.log(np.maximum(p[np.arange(n), took], 1e-12)).mean())
+        mean = (p[:, :, None] * d).sum(axis=1)
+        grad = (d[np.arange(n), took] - mean).sum(axis=0)
+        H = np.einsum("nk,nki,nkj->ij", p, d, d) - mean.T.dot(mean)
+        prec = state["prec"] + H
+        try:
+            step = np.linalg.solve(prec, grad)
+        except np.linalg.LinAlgError:
+            return None
+        if not np.isfinite(step).all():
+            return None
+
+        def gain(move):
+            # how much likelier the game's moves become, less what moving that far from the earlier games costs
+            s2 = np.where(ok, d.dot(state["v"] + move), -1e18)
+            s2 = s2 - s2.max(axis=1, keepdims=True)
+            fit = float((s2[np.arange(n), took] - np.log((np.exp(s2) * ok).sum(axis=1))).sum()) + loss * n
+            return fit - 0.5 * float(move.dot(state["prec"]).dot(move))
+
+        # (a full step from far off can overshoot: halve it until it is a gain)
+        for _ in range(6):
+            if gain(step) > 0.0:
+                break
+            step = step * 0.5
+        else:
+            return None
+        state["v"], state["prec"] = state["v"] + step, prec
+        state["games"] += 1
+        state["moves"] += n
+        state["last"] = loss
+        self.set_weights({nm: v / s for nm, v, s in zip(names, state["v"], scale)})
+        self._learn_save()
+        return loss
+
+    def _learn_save(self):
+        state = self.learning
+        if state is None or not state["path"]:
+            return
+        np = self.np
+        m = len(state["names"])
+        data = {
+            "kind": "timed_odds_learned", "base": state["base"], "trust": PACMAN_CLOUD_LEARN_TRUST,
+            "games": state["games"], "moves": state["moves"], "names": state["names"],
+            "weights": [float(x) for x in state["v"]],
+            "prec_upper": [float("%.12g" % x) for x in state["prec"][np.triu_indices(m)]],
+        }
+        try:
+            scratch = state["path"] + ".tmp"
+            with open(scratch, "w") as handle:
+                json.dump(data, handle)
+            os.replace(scratch, state["path"])
+        except OSError:
+            pass  # nowhere to keep it: what was learned lasts until the game is closed
 
     # ---- the model's scores for each way, for many ghosts ------------------
     def _view(self, prefix, S, c0, valid, t, is_straight, is_rev, moving, pp, ppd, fr, rf, nopt):
@@ -6588,7 +6838,19 @@ class _Planner(object):
                 self._ff_setup()
             model = _PlanModel(key, key=(-1.0, 0.0))
             import numpy  # noqa: F401 (the cloud cannot be worked out without it)
-            model.cloud = _CloudLater(self, weights)
+            learn = None
+            sure = data.get("certainty")
+            if sure and PACMAN_CLOUD_LEARN != "0":
+                # what learning from later games starts from (see PACMAN_CLOUD_LEARN)
+                where = {n: k for k, n in enumerate(data["names"])}
+                at = [where[n] for n in sure["names"]]
+                learn = {
+                    "names": list(sure["names"]), "upper": sure["upper"],
+                    "scale": [data["scale"][k] for k in at], "weights": [data["weights"][k] for k in at],
+                    "base": "%s %d %.12g %.12g" % (
+                        name, len(at), sum(data["weights"][k] for k in at), sum(abs(x) for x in sure["upper"])),
+                }
+            model.cloud = _CloudLater(self, weights, learn)
             model.spec = ("cloud", name)
         except (OSError, ValueError, KeyError, ImportError):
             model = None
@@ -6766,10 +7028,16 @@ class _Planner(object):
                     break
                 return "partial", self._path(best_seen), nodes, depth, best_seen[7]
         if marks:
+            leaf = None
+            if PACMAN_CLOUD_ROOM and level and depth > mark_depth:
+                leaf = self.cloud_room(cloud, level, A, now)  # the danger of where each line leaves him
             risk = {}
-            for node in level:
-                if node[12] >= 0 and node[13] < risk.get(node[12], 2.0):
-                    risk[node[12]] = node[13]
+            for row, node in enumerate(level):
+                if node[12] < 0:
+                    continue
+                total = node[13] if leaf is None else node[13] + PACMAN_CLOUD_ROOM * float(leaf[row])
+                if total < risk.get(node[12], 9.0):
+                    risk[node[12]] = total
             out = []
             reach = float(max(1, depth))
             for way in (mark_ways or ()):
@@ -6879,6 +7147,36 @@ class _Planner(object):
             if deadline is not None and time.perf_counter() > deadline:
                 break
         return "partial", self._path(best_seen), nodes, depth, best_seen[7]
+
+    def cloud_room(self, cloud, level, A, now):
+        """For each line of the search as it stands (`level`, with its cloud
+        `A`, at frame `now`): the danger of where it leaves him - over the
+        ghosts of the cloud still after him, the chance of being caught soon
+        that goes with the room he has there (the tiles he reaches before
+        that ghost or any classic ghost that is out, each at its own speed:
+        see PACMAN_CLOUD_ROOM). Nothing while his power lasts."""
+        np = cloud.np
+        PD = cloud.PD999
+        K = A.shape[1]
+        never = 10 ** 7
+        pos = np.array([node[1] for node in level], dtype=np.int64)
+        powered = np.array([now < node[4] for node in level], dtype=bool)
+        t_pac = PD[pos] * self.PAC
+        soon = np.full(t_pac.shape, never, dtype=np.int64)
+        for i in range(1, 5):
+            out = np.array([node[2][i][3] for node in level], dtype=bool)
+            if out.any():
+                reach = PD[np.array([node[2][i][0] for node in level], dtype=np.int64)] * self.AI
+                reach[~out] = never
+                soon = np.minimum(soon, reach)
+        reach = PD[A[:, :, _CF_TILE]] * self.GH
+        reach[A[:, :, _CF_LEFT] != 1] = never  # (back in the house: not after him for now)
+        mine = (t_pac[:, None, :] < np.minimum(reach, soon[:, None, :])) & cloud.INPD[None, None, :]
+        room = mine.sum(axis=2)
+        danger = cloud.DANGER[np.minimum(room, len(cloud.DANGER) - 1)] * (A[:, :, _CF_ALIVE] == 1)
+        share = danger.sum(axis=1) / float(K)
+        share[powered] = 0.0
+        return share
 
     def plan_cloud(self, state, track, forced, seconds=None, width=None):
         """The plan against the cloud from `state` once he has stepped to
@@ -7428,6 +7726,18 @@ def _cloud_step_safe(planner, state, step):
 PACMAN_PLANNER_SECONDS = float(os.environ.get("PACMAN_PLANNER_SECONDS", "0.15"))  # thinking time per move in a real game
 
 
+def _plan_worker_learn(planner, item):
+    """A finished game's moves of the player's ghost, sent by the game for
+    the odds to learn from: ("learn", odds file, rows)."""
+    try:
+        model = planner.cloud_model(item[1])
+        if model is not None:
+            model.cloud = model.cloud.built()
+            model.cloud.learn(item[2])
+    except Exception as exc:  # never the search process's end: the odds just stay as they were
+        print("Could not learn from the last game (%r); the odds stay as they were." % (exc,), file=sys.stderr)
+
+
 def _plan_worker_main(conn):
     """The search process: answers each (number, picture of the ghost,
     release frames, position, seconds, power pellet order) with (number, kind, steps, search
@@ -7444,11 +7754,21 @@ def _plan_worker_main(conn):
         rates = {}  # search steps a second on this machine, by kind of picture; measured as it goes
         widths = {}
         while True:
-            message = conn.recv()
+            waiting = [conn.recv()]
             while conn.poll():
-                message = conn.recv()
-            if message is None:
+                waiting.append(conn.recv())
+            message, closing = None, False
+            for item in waiting:  # every finished game is learned from; only the newest question is answered
+                if item is None:
+                    closing = True
+                elif item[0] == "learn":
+                    _plan_worker_learn(planner, item)
+                else:
+                    message = item
+            if closing:
                 return
+            if message is None:
+                continue
             number, spec, rel, state, seconds, order = message
             planner.model = planner.model_from(spec)
             planner.rel = list(rel)
@@ -7511,6 +7831,17 @@ class _PlanWorker(object):
         except (OSError, ValueError):
             self.asked = None
 
+    def tell(self, message):
+        """Sends the search process something it need not answer."""
+        if not self.ready:
+            self.poll()
+            if not self.ready:
+                return
+        try:
+            self.conn.send(message)
+        except (OSError, ValueError):
+            pass
+
     def poll(self):
         """The answer to the last question asked, if it has come:
         {"root": position, "steps": [...], "kind": ...}; else None."""
@@ -7540,7 +7871,7 @@ class _PlanWorker(object):
         except (OSError, ValueError):
             pass
         try:
-            self.process.join(0.5)
+            self.process.join(1.5)  # (it may be learning from the game just ended)
             if self.process.is_alive():
                 self.process.terminate()
         except (OSError, ValueError, AttributeError):
@@ -7951,6 +8282,7 @@ class Game:
     def reset_game(self):
         self.pacman_weights = self.brain.current_weights()
         self._pg_hold = None  # how long the player ghost has stood still (see PACMAN_HOLD_FACTOR)
+        _cloud_flush(self)  # (a game started again before its end still teaches)
         self._plan = None  # the whole-game planner's memory of this game (see PACMAN_PLANNER)
         # Every move the player's ghost has made of its own choosing (outside
         # the house): (from, to, Pac-Man's tile, frightened). The planner
@@ -8582,6 +8914,7 @@ class Game:
         """
         self.game_over = True
         self.outcome = outcome
+        _cloud_flush(self)  # what the player's ghost did in this game: the odds learn from it (PACMAN_CLOUD_LEARN)
         self.result_message = GAME_OVER_STYLES[outcome]["title"]
         self.play_sound({"ghost_win": "caught", "maze_cleared": "cleared"}.get(outcome, "stalemate"))
 

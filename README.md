@@ -90,6 +90,51 @@ the game starts. None of them changes a rule of the game - only how he decides.
   hardly ever clears the maze against any of them. Letting the search steer
   him directly, in place of marking his own choices, was tried first and was
   10 points worse.
+- `PACMAN_CLOUD_ROOM` (default 2): pincers. Against a person he is seldom
+  run down by one ghost: a classic ghost pushes him along and your ghost
+  closes the other way out. Taken apart, 79 of 99 simulated catches came
+  from two sides at once, and the cloud above only saw them once they were
+  inside its 12 moves: 8 moves before the end his best way already lost
+  half the cloud or more in 61% of the catches, while 20 moves before it
+  that way still looked nearly free in 79%. What does show it coming is his
+  room: the tiles he would reach before any ghost that is out, each at its
+  own speed. In your recorded games (11,338 of his decisions, 43 games) he
+  was caught within his next 20 moves 1-2% of the time with 40 tiles of room
+  or more, 6% with 20-29, 32% with 10-14, 55% with 5-9 and 87% with under 5
+  - whatever the distance to your ghost, which on its own says almost
+  nothing. So every line of the cloud's search now also carries the danger
+  of where it leaves him: for each of the 16 ghosts still after him, the
+  chance above for the room he would have there against it and the classic
+  ghosts. A way's mark is the share caught on the way plus twice that.
+  Set `PACMAN_CLOUD_ROOM=0` to switch it off.
+  Measured on the same simulated games with and without it: against the
+  stand-in that plays like you, 66.3% -> 69.2% of the maze eaten and caught
+  after 85 s instead of 79 s (281 games); with other weights on the room the
+  gain was 1.3 to 2.7 points, so call it about 2. Against the "pouncing"
+  ghost and the older stand-in it changed nothing (-0.6 and -0.5 points,
+  300 games each). He still does not clear the maze.
+- `PACMAN_CLOUD_LEARN` (default 1): learning from the games you play. The
+  odds file is a picture of how you played when it was fitted, and people
+  change - your own style did, between your first 98 recorded games and the
+  later ones. After every game you play, the moves your ghost made in it
+  move the weights of the odds a little (the same sum as fitting the file
+  again with that game added, with the games it was fitted on counting half:
+  `PACMAN_CLOUD_LEARN_TRUST`). What has been learned is kept in
+  `player_ghost_versions/timed_odds_learned.json`; delete that file to go
+  back to the odds as fitted, or set `PACMAN_CLOUD_LEARN=0` to stop learning.
+  Measured on your recorded games, in the order you played them: odds fitted
+  on the first 98 games only, read over the 71 later ones, were surprised by
+  your moves at a rate (log-loss) of 0.2755 without learning and 0.2672 with
+  it - 0.2692 against 0.2821 over the last third - where odds fitted on both
+  periods score 0.2631. So about two thirds of what a stale picture loses
+  comes back, most of it after twenty-odd games. With odds that are already
+  up to date it changes nothing (0.2636 against 0.2631), and in 100 simulated
+  games it made no difference to how he played (69.0% against 69.5%).
+  Changing the odds within a game, after every move, was measured too and
+  does nothing (0.2627 to 0.2691 against 0.2631, however it was done): one
+  game does not hold enough of your moves to learn from. So nothing changes
+  in the middle of a game; each new game starts with what the last one
+  taught.
 - `PACMAN_SURE_KILL` (default 1): the certain kill. While a power pellet is
   working, your ghost walks at about two thirds of his speed, so each step he
   takes towards it closes the gap whatever it does. When the power time left
