@@ -26,6 +26,7 @@ weight_inertness_screen.json
 player_ghost_versions/*
 !player_ghost_versions/full_power.json
 !player_ghost_versions/full_power_hops.json
+!player_ghost_versions/timed_odds_lite.json
 !player_ghost_versions/claude_plus.json
 !player_ghost_versions/blinky_plus.json
 !player_ghost_versions/goose.json

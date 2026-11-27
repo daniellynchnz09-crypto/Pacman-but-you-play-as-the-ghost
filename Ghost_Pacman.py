@@ -5079,6 +5079,11 @@ def choose_pacman_step(
             flip_streak += 1
         if flip_streak:
             flip_tile = trail[-2]
+    # What the cloud of likely ghosts says about each way (see PACMAN_CLOUD_MODE). Not while the power lasts.
+    cloud_risk = None
+    if _CLOUD_MARKS["at"] == position and pursuer_active and sim_state["now"] >= sim_state["power_until"]:
+        cloud_risk = _CLOUD_MARKS["risk"]
+        cloud_best = min(cloud_risk.get(step, 1.0) for step in options)
     best_step, best_score = options[0], float("-inf")
     for step in options:
         distances = pacman_bfs_distances(step)
@@ -5128,6 +5133,8 @@ def choose_pacman_step(
         early_rush_urgency = weights["early_rush_weight"] if not permanent_chase else 0.0
         score = -(weights["target_distance_weight"] + weights["endgame_rush_weight"] * endgame_urgency + early_rush_urgency) * target_distance - danger_score - far_danger_score
         score -= weights["loop_escape_weight"] * loop_revisit_count
+        if cloud_risk is not None:
+            score -= PACMAN_CLOUD_WEIGHT * (cloud_risk.get(step, 1.0) - cloud_best)
         if worst_marks is not None:
             score -= min(PACMAN_WORST_CLIP, PACMAN_WORST_WEIGHT * (worst_best - worst_marks[step]))
             if PACMAN_WORST_DEAD and step in _WORST_DEAD_STEPS:
@@ -5476,7 +5483,10 @@ SOUND_RECIPES = {
 #     chaser, and a chaser that also cuts off his exits), and a picture
 #     that has called PACMAN_PLANNER_TRUST_RUN moves in a row is believed
 #     until it gets one wrong.
-# With no such picture he plays exactly as before. A plan built on a wrong
+#   - neither: it is then a person, or plays like one. He goes on deciding
+#     move by move, helped by a cloud of likely ghosts (see PACMAN_CLOUD
+#     below).
+# A plan built on a wrong
 # picture is far worse than no plan (measured against the stand-in for the
 # person playing: 46-53% of the maze eaten, against 58% for the
 # move-by-move play above), which is why the rule is strict: a first
@@ -5513,6 +5523,593 @@ PACMAN_PLANNER_MIN_LIFE = int(os.environ.get("PACMAN_PLANNER_MIN_LIFE", "24"))
 # switch to a quicker one when the search finds it.
 PACMAN_PLANNER_IMPROVE = os.environ.get("PACMAN_PLANNER_IMPROVE", "0") == "1"
 PACMAN_PLANNER_STATIC = os.environ.get("PACMAN_PLANNER_STATIC", "0") == "1"  # also with no player ghost at all
+# Planning against a ghost that is not a plain chaser - a person, or a model
+# of one - with ONE predicted line for it (PACMAN_PLANNER_FITTED, default off:
+# measured and not adopted. It clears mazes against a ghost whose moves the
+# model calls 97% or more of the time; against one it calls about 91% of the
+# time it was no better than no plan, or worse, and the player's own moves
+# are called less often than that. Kept for comparisons; PACMAN_CLOUD is what
+# is used against a person.) He then plans with the model
+# fitted to the player's recorded games (PACMAN_PLANNER_FITTED_MODEL, a file
+# in player_ghost_versions/), which calls about 85% of the real player's
+# moves (71% where three or more ways are open). Three things make that
+# usable:
+#   - The safeguard (PACMAN_PLANNER_WC). A plan built on "the ghost will
+#     probably go there" walks straight into a ghost that goes somewhere
+#     else on purpose: against a test ghost that leaves the model whenever
+#     it can force a catch, the plan without a safeguard was caught at a
+#     median 12 seconds, with 28% of the maze eaten (the move-by-move play
+#     above: 53%). So every position in a plan is also looked up in the
+#     exact one-on-one table (_worst_case_table): if a ghost playing
+#     perfectly from there could catch him within PACMAN_PLANNER_WC_SAFE
+#     moves, and there is no power pellet he reaches first, the position is
+#     charged in proportion - in full for his next PACMAN_PLANNER_WC_NEAR
+#     moves, a quarter beyond. At 60 the plan still lost to that ghost; from
+#     120 up it gains against it and against the stand-in for the player.
+#   - The fitted model costs about eight times a chaser's move to work out,
+#     and how far the search gets decides everything (a third of the search:
+#     no gain; a ninth: a loss). So it is used for his next
+#     PACMAN_PLANNER_FITTED_DEPTH moves only, and beyond that the model's
+#     saved moves table (<model>_hops.json), a plain chaser where the table
+#     is silent. 30 moves keeps the whole gain; 12 and 20 do not.
+#   - A ghost that is standing still (the idle-ghost rule above) is not
+#     planned against: the model never stands still.
+# Measured with a search the size a real game affords, him not told how the
+# ghost moves and planning with a model fitted on other games than the
+# ghost's, 104 games on the same seeds: against the stand-in for the player
+# 5 mazes cleared (none without) and 61.6% of the maze eaten (58.4%);
+# against the test ghost that leaves the model 6 cleared (none) and 58.8%
+# (53.0%).
+PACMAN_PLANNER_FITTED = os.environ.get("PACMAN_PLANNER_FITTED", "0") == "1"
+PACMAN_PLANNER_FITTED_MODEL = os.environ.get("PACMAN_PLANNER_FITTED_MODEL", "refit_20261125")
+PACMAN_PLANNER_FITTED_DEPTH = int(os.environ.get("PACMAN_PLANNER_FITTED_DEPTH", "30"))
+# Search steps for one such plan in a headless test: what the real game's
+# search process gets through in its PACMAN_PLANNER_SECONDS.
+PACMAN_PLANNER_FITTED_NODES = int(os.environ.get("PACMAN_PLANNER_FITTED_NODES", "5500"))
+PACMAN_PLANNER_FITTED_CAP = int(os.environ.get("PACMAN_PLANNER_FITTED_CAP", "9000"))  # and never more than this
+PACMAN_PLANNER_WORKERS = int(os.environ.get("PACMAN_PLANNER_WORKERS", "1"))  # search processes for such a plan
+# What a power pellet still on the board is worth in such a plan (see PACMAN_PLANNER_PP, which is for a
+# plain chaser).
+PACMAN_PLANNER_FITTED_PP = float(os.environ.get("PACMAN_PLANNER_FITTED_PP", "1000"))
+PACMAN_PLANNER_WC = float(os.environ.get("PACMAN_PLANNER_WC", "800"))
+PACMAN_PLANNER_WC_SAFE = int(os.environ.get("PACMAN_PLANNER_WC_SAFE", "66"))
+PACMAN_PLANNER_WC_NEAR = int(os.environ.get("PACMAN_PLANNER_WC_NEAR", "12"))
+PACMAN_PLANNER_WC_FAR = float(os.environ.get("PACMAN_PLANNER_WC_FAR", "0.25"))
+
+# --- against a person: a cloud of likely ghosts ------------------------------
+# A person's ghost cannot be forecast as one line. Measured on the player's
+# recorded games: the best single forecast is within 2 tiles of the real ghost
+# 78% of the time after 4 of its moves, 59% after 8, 44% after 12. But the
+# ODDS of each way it might go can be had honestly (the "timed odds" model:
+# what was on screen now and two ghost moves ago, how long since Pac-Man turned
+# round, how long since the ghost did - a person turns round 2-3 moves after
+# Pac-Man does), and of eight ghosts drawn from those odds the real one is
+# within 2 tiles of at least one 96% / 87% / 81% of the time after 4 / 8 / 12
+# moves.
+#
+# So against a ghost that is not a plain chaser a cloud stands in for it:
+# PACMAN_CLOUD_K ghosts, each drawn move by move from the model's odds, all
+# starting where the real one is. After each of his moves every line of play
+# open to him for his next PACMAN_CLOUD_DEPTH moves is run against all of
+# them (and the classic ghosts' expected moves), and at his next decision each
+# way open is marked by the share of the cloud that catches him down it on
+# the line that loses fewest (see PACMAN_CLOUD_MODE). He goes on deciding
+# move by move; the marks are one more thing weighed.
+#
+# Measured over 300 simulated games each on the same seeds, him planning with
+# a model fitted on other recorded games than the stand-in's:
+#   a stand-in that turns, hesitates and doubles back at the player's own
+#   rates (drawn from the timed odds)      62.7% -> 66.6% of the maze eaten
+#                                          (+3.9 points, z 3.9), caught after a
+#                                          median 66 s -> 79 s
+#   the sharper "pouncing" ghost           54.3% -> 57.4% (+2.8, z 2.6)
+#   the older stand-in (one fixed move
+#   for every position)                    61.1% -> 61.4% (no change)
+# With PACMAN_CLOUD=0 he plays game for game as before.
+PACMAN_CLOUD = os.environ.get("PACMAN_CLOUD", "1") == "1"
+PACMAN_CLOUD_MODEL = os.environ.get("PACMAN_CLOUD_MODEL", "timed_odds_lite")
+PACMAN_CLOUD_K = int(os.environ.get("PACMAN_CLOUD_K", "16"))
+PACMAN_CLOUD_DEPTH = int(os.environ.get("PACMAN_CLOUD_DEPTH", "12"))
+PACMAN_CLOUD_TOTAL = int(os.environ.get("PACMAN_CLOUD_TOTAL", "48"))  # how far a plan is searched in all, in his moves
+PACMAN_CLOUD_WIDTH = int(os.environ.get("PACMAN_CLOUD_WIDTH", "40"))  # lines kept at each move of the search
+PACMAN_CLOUD_DEATH = float(os.environ.get("PACMAN_CLOUD_DEATH", "3000"))
+PACMAN_CLOUD_PP = float(os.environ.get("PACMAN_CLOUD_PP", "400"))  # a power pellet still on the board (see PACMAN_PLANNER_PP)
+PACMAN_CLOUD_FAVOURITE = os.environ.get("PACMAN_CLOUD_FAVOURITE", "1") == "1"  # one of the cloud always takes the likeliest way
+PACMAN_CLOUD_FAR = os.environ.get("PACMAN_CLOUD_FAR", "chaser")  # beyond the cloud: "chaser" (the nearest of them) or "none"
+# How the cloud is used. "marks": as above - each way open is marked down by PACMAN_CLOUD_WEIGHT times the
+# share of the cloud that catches him down it (less the same for his best way). "plan": he follows the search's
+# own line of play instead of deciding move by move - measured first and 10 points of maze WORSE (54.1% against
+# 64.2%, 150 games), most of it lost to the classic ghosts, which the move-by-move play dodges far better than
+# the search does. Kept for comparisons only.
+# Weights tried with 8 ghosts (300 games each, points gained): 300 +1.5, 800 +3.0, 1500 +4.4 (4000, 100
+# games: +1.8). 16 ghosts in place of 8: +3.8 against +3.0. 8 moves deep in place of 12: +2.4; 20: no better.
+PACMAN_CLOUD_MODE = os.environ.get("PACMAN_CLOUD_MODE", "marks")
+PACMAN_CLOUD_WEIGHT = float(os.environ.get("PACMAN_CLOUD_WEIGHT", "1200"))
+# A way down which no line of play survives the cloud is marked 1 to 2 by how soon the end comes (0: all such
+# ways are marked 1 alike; measured +0.5 points better than that against the stand-in, no worse elsewhere).
+PACMAN_CLOUD_LASTING = os.environ.get("PACMAN_CLOUD_LASTING", "1") == "1"
+_CLOUD_MARKS = {"at": None, "risk": None}  # the marks for the decision in hand: his tile, {way: risk}
+
+_CLOUD_BUCKET = (0, 1, 2, 3, 4, 4, 5, 5, 5, 5, 6)  # how "moves since" is grouped: 0, 1, 2, 3, 4-5, 6-9, 10 or more
+# one ghost of the cloud, as a row of whole numbers
+(_CF_TILE, _CF_PREV, _CF_LAST, _CF_LEFT, _CF_ALIVE, _CF_DIR, _CF_SPR, _CF_SPT, _CF_SOR, _CF_SOT, _CF_AWAY, _CF_LPD,
+ _CF_TWO, _CF_H1P, _CF_H1D, _CF_H1T, _CF_H2P, _CF_H2D, _CF_H2T) = range(19)
+_CF_COUNT = 19
+_CLOUD_NEVER = -10 ** 9
+
+
+class _CloudTrack(object):
+    """What the timed-odds model needs to know about the game so far, kept up
+    to date at every move the player's ghost makes outside the house: how many
+    of its moves ago Pac-Man last turned and last turned right round, how many
+    since the ghost itself did, how long it has been walking away from him,
+    and where he was at its last two moves."""
+
+    def __init__(self):
+        self.spr = self.spt = self.sor = self.sot = 99
+        self.away = 0
+        self.lpd = 5  # his heading at the ghost's last move (5: none seen yet)
+        self.two = 4  # the ghost's heading before its last move (4: none)
+        self.h1 = (0, 4, _CLOUD_NEVER)  # (his tile, his heading, ms) at the ghost's last move
+        self.h2 = (0, 4, _CLOUD_NEVER)  # and at the one before
+        self.cur = 4  # the way of the ghost's last move
+
+    def fields(self):
+        return (self.spr, self.spt, self.sor, self.sot, self.away, self.lpd, self.two) + self.h1 + self.h2 + (self.cur,)
+
+    def observe(self, planner, ghost, direction, chosen, pacman, pacman_direction, t_ms):
+        """The ghost on `ghost` heading `direction` is stepping `chosen`."""
+        dirs = _CLOUD_DIR_INDEX
+        pd = dirs.get(tuple(pacman_direction), 4)
+        if self.lpd == 5:
+            self.lpd = pd
+        elif pd != self.lpd and pd != 4:
+            self.spt = 0
+            if pd == _CLOUD_OPPOSITE[self.lpd]:
+                self.spr = 0
+            self.lpd = pd
+        dr = dirs.get(tuple(direction), 4)
+        ch = dirs.get(tuple(chosen), 4)
+        rev = _CLOUD_OPPOSITE[dr]
+        table = PACMAN_DISTANCE_TABLE
+        d_fwd = d_rev = 99
+        has_rev = has_fwd = False
+        for k, way in enumerate(CARDINALS):
+            tile = step_position(ghost, way)
+            if not is_open(*tile) or tile in HOUSE_TILES:
+                continue
+            gap = table.get(tile, {}).get(pacman, 99)
+            if k == rev:
+                has_rev, d_rev = True, gap
+            else:
+                has_fwd = True
+                if gap < d_fwd:
+                    d_fwd = gap
+        if has_rev and dr != 4 and has_fwd:
+            self.away = self.away + 1 if (d_rev < d_fwd and ch != rev) else 0
+        if ch == rev:
+            self.sor = 0
+            self.away = 0
+        else:
+            self.sor += 1
+        self.sot = 0 if ch != dr else self.sot + 1
+        self.spr += 1
+        self.spt += 1
+        self.two = dr
+        self.cur = ch
+        self.h2 = self.h1
+        self.h1 = (planner.idx[pacman], pd, t_ms)
+
+
+_CLOUD_DIR_INDEX = {way: k for k, way in enumerate(CARDINALS)}
+_CLOUD_OPPOSITE = [_CLOUD_DIR_INDEX[(-way[0], -way[1])] for way in CARDINALS] + [4, 5]
+
+
+def _cloud_observe(game, now, chosen):
+    """Called as the player's ghost makes a move of its own choosing (before
+    the move is applied): keeps the game's _CloudTrack."""
+    if not (PACMAN_PLANNER and PACMAN_CLOUD):
+        return
+    if not game.player_ghost_seen:
+        game._cloud_track = _CloudTrack()  # (its first such move of the game)
+    track = getattr(game, "_cloud_track", None)
+    if track is None:
+        track = game._cloud_track = _CloudTrack()
+    track.observe(
+        _planner(), game.ghost_position, game.ghost_direction, chosen, game.pacman_position, game.pacman_direction,
+        now - game.start_time,
+    )
+
+
+class _CloudLater(object):
+    """A _Cloud not yet built: its tables take a few seconds, and in a real
+    game only the search process ever needs them."""
+
+    def __init__(self, planner, weights):
+        self.planner, self.weights = planner, weights
+
+    def built(self):
+        return _Cloud(self.planner, self.weights)
+
+
+class _Cloud(object):
+    """The timed-odds model worked out for many ghosts at once (numpy), and
+    the cloud's moves. The same answers as the code the model was fitted with
+    (compared on every recorded move of the player: see the scratch check
+    cloudcheck.py - change either and the comparison has to be run again)."""
+
+    def __init__(self, planner, weights):
+        import numpy as np
+        self.np = np
+        self.planner = planner
+        N = self.N = planner.N
+        XY = planner.tiles
+        idx = planner.idx
+        w = self.w = lambda name: float(weights.get(name, 0.0))
+        self.CX = np.array([t[0] for t in XY], dtype=np.int64)
+        self.CY = np.array([t[1] for t in XY], dtype=np.int64)
+        self.DX = np.array([way[0] for way in CARDINALS] + [0, 0], dtype=np.int64)
+        self.DY = np.array([way[1] for way in CARDINALS] + [0, 0], dtype=np.int64)
+        self.OPP = np.array(_CLOUD_OPPOSITE, dtype=np.int64)
+        self.BK = np.array(_CLOUD_BUCKET, dtype=np.int64)
+        self.WAY = np.full((N, 4), -1, dtype=np.int64)
+        for a, here in enumerate(XY):
+            if here in HOUSE_TILES:
+                continue
+            for k, way in enumerate(CARDINALS):
+                to = step_position(here, way)
+                if is_open(*to) and to not in HOUSE_TILES and to in idx:
+                    self.WAY[a, k] = idx[to]
+        self.DIRIDX = {}
+        for (a, b), way in planner.DIRS.items():
+            self.DIRIDX[(a, b)] = _CLOUD_DIR_INDEX.get(tuple(way), 4)
+        self.HOUSE = np.array(planner.HOUSE, dtype=bool)
+        self.EXIT = np.array(planner.EXIT, dtype=np.int64)
+        self.EXITDIR = np.array([self.DIRIDX.get((a, planner.EXIT[a]), 4) for a in range(N)], dtype=np.int64)
+        self.HOME0 = planner.HOME[0]
+        self.ROW23 = np.array([t[1] == 23 for t in XY], dtype=bool)
+        raw = np.full((N, N), -1, dtype=np.int64)
+        for a, row in PACMAN_DISTANCE_TABLE.items():
+            ia = idx[a]
+            for b, dist in row.items():
+                raw[ia, idx[b]] = dist
+        self.PD999 = np.where(raw < 0, 999, raw)
+        self.PD99 = np.where(raw < 0, 99, raw)
+        self.PD40 = np.where(raw < 0, 40, raw)
+        self.INPD = np.array([t in PACMAN_DISTANCE_TABLE for t in XY], dtype=bool)
+        self.BFS = np.zeros((N, N), dtype=np.int64)
+        self.EXITD = np.zeros((N, N), dtype=np.int64)
+        for a, here in enumerate(XY):
+            row = bfs_distances(here)
+            far = len(row) + 1
+            self.BFS[a] = [row.get(t, far) for t in XY]
+            exits = pacman_neighbours(here)
+            if exits:
+                self.EXITD[a] = np.min(
+                    [(self.CX - ex) ** 2 + (self.CY - ey) ** 2 for ex, ey in exits], axis=0)
+        self.HEADS = np.zeros((N, 6, 6), dtype=np.int64)
+        self.AHEAD1 = np.zeros((N, 6), dtype=np.int64)
+        for a, here in enumerate(XY):
+            for k in range(6):
+                way = CARDINALS[k] if k < 4 else (0, 0)
+                self.AHEAD1[a, k] = a
+                if here not in PACMAN_DISTANCE_TABLE:
+                    continue
+                ahead, behind, straight_on, lead3, lead6, lead10 = _pacman_heading(here, way)
+                self.HEADS[a, k] = (
+                    idx[ahead], idx[behind], -1 if straight_on is None else idx[straight_on],
+                    idx[lead3], idx[lead6], idx[lead10],
+                )
+                if k < 4:
+                    nxt = step_position(here, way)
+                    if nxt in PACMAN_DISTANCE_TABLE:
+                        self.AHEAD1[a, k] = idx[nxt]
+        self.EX = np.zeros((N, N), dtype=np.int64)
+        tables = _worst_case_table()
+        if tables is not None:
+            rows, index = tables
+            where = [index.get(t) for t in XY]
+            for a, ia in enumerate(where):
+                if ia is None:
+                    continue
+                row = rows[ia]
+                self.EX[a] = [0 if ib is None else row[ib] for ib in where]
+        self.GDm = np.array(planner.GD, dtype=np.int64)
+        wc = planner.worst_case()
+        self.WCm = None if wc is None else np.array(wc, dtype=np.int64)
+        names = lambda stem: np.array([w("%s_%d" % (stem, k)) for k in range(7)])
+        self.W_U_PR, self.W_U_OR, self.W_U_PT = names("u_since_pac_rev"), names("u_since_own_rev"), names("u_since_pac_turn")
+        self.W_T, self.W_S = names("t_nearest_pac_turn"), names("s_since_own_turn")
+        self.W_U_AWAY = np.array([w("u_nearer_away0"), w("u_nearer_away1"), w("u_nearer_away2"), w("u_nearer_away3plus")])
+        self.W_S_AWAY = np.array([w("s_away_run1"), w("s_away_run2"), w("s_away_run3plus")])
+        self.WAYS4 = np.arange(4, dtype=np.int64)[None, :]
+        self.DXW = self.DX[:4][None, :]
+        self.DYW = self.DY[:4][None, :]
+        self.GH_MS, self.PAC_MS = GHOST_MOVE_DELAY, PACMAN_MOVE_DELAY
+
+    def built(self):
+        return self
+
+    # ---- the model's scores for each way, for many ghosts ------------------
+    def _view(self, prefix, S, c0, valid, t, is_straight, is_rev, moving, pp, ppd, fr, rf, nopt):
+        """Adds the inputs that look at where Pac-Man is (`pp`) and is heading
+        (`ppd`) - now, or as it was two ghost moves ago (`prefix` "then_")."""
+        np, w = self.np, self.w
+        big = 10 ** 6
+        col = pp[:, None]
+        bfs = self.BFS[col, c0]
+        calm = ~fr
+        S += w(prefix + "dist_pacman") * bfs
+        lead_x = self.CX[pp] + 4 * self.DX[ppd]
+        lead_y = self.CY[pp] + 4 * self.DY[ppd]
+        S += w(prefix + "dist_lead") * ((self.CX[c0] - lead_x[:, None]) ** 2 + (self.CY[c0] - lead_y[:, None]) ** 2)
+        S += w(prefix + "dist_pacman_exit") * self.EXITD[col, c0]
+        S += w(prefix + "reversal") * is_rev
+        S += w(prefix + "dist_pacman_urgency") * (bfs * ((1.0 - rf) * fr)[:, None])
+        S += w(prefix + "straight") * (is_straight & moving[:, None])
+        nearest = np.where(valid, bfs, big).min(axis=1)
+        S += w(prefix + "nearest_to_pacman") * (bfs <= nearest[:, None])
+        # (player_ghost_hunt_terms)
+        known = self.INPD[pp][:, None]
+        PD = self.PD999
+        gap = PD[col, c0]
+        head = self.HEADS[pp, ppd]
+        junction = (nopt >= 3)[:, None]
+        near_all = np.where(valid, gap, big).min(axis=1)
+        forward = valid & ~is_rev
+        no_forward = ~forward.any(axis=1)
+        near_forward = np.where(no_forward, near_all, np.where(forward, gap, big).min(axis=1))
+        H = np.zeros_like(S)
+        for k, name in ((3, "lead3_dist"), (4, "lead6_dist"), (5, "lead10_dist")):
+            H += w(prefix + name) * PD[c0, head[:, k][:, None]]
+        H += w(prefix + "nearest_without_reversing") * ((no_forward[:, None] | ~is_rev) & (gap == near_forward[:, None]))
+        H += w(prefix + "nearest_at_junction") * (junction & (gap == near_all[:, None]))
+        H += w(prefix + "straight_at_junction") * (is_straight & junction)
+        if fr.any():
+            F = w(prefix + "flee") * gap + w(prefix + "flee_near") * np.minimum(gap, 12) + w(prefix + "straight_frightened") * is_straight
+            H += F * fr[:, None]
+        if calm.any():
+            ahead, behind, straight_on = head[:, 0], head[:, 1], head[:, 2]
+            ahead_d = PD[c0, ahead[:, None]]
+            behind_d = PD[c0, behind[:, None]]
+            C = w(prefix + "junction_ahead_dist") * ahead_d
+            C = C + w(prefix + "junction_ahead_first") * (ahead_d * self.GH_MS <= (PD[pp, ahead] * self.PAC_MS)[:, None])
+            C += w(prefix + "junction_behind_dist") * behind_d
+            C += w(prefix + "junction_behind_first") * (behind_d * self.GH_MS <= (PD[pp, behind] * self.PAC_MS)[:, None])
+            best_ahead = np.where(valid, ahead_d, big).min(axis=1)
+            C += w(prefix + "junction_ahead_nearest") * (ahead_d == best_ahead[:, None])
+            closing = (straight_on >= 0) & (PD[np.maximum(straight_on, 0), t] < PD[pp, t])
+            C += w(prefix + "reversal_closing") * (is_rev & closing[:, None])
+            C += w(prefix + "reversal_away") * (is_rev & ~closing[:, None])
+            H += C * calm[:, None]
+        S += H * known
+
+    def scores(self, t, dr, p, pd, q, qd, fr, rf, spr, spt, sor, sot, away, two):
+        """(scores [B, 4] for the four ways in CARDINALS order, which of them
+        are open, could it turn round, is turning round the nearer way) for B
+        ghosts: on tile `t` heading `dr`, Pac-Man on `p` heading `pd` (two
+        ghost moves ago: `q`, `qd`), frightened `fr` with the share `rf` of
+        the power time left, and the counters of _CloudTrack."""
+        np, w = self.np, self.w
+        big = 10 ** 6
+        c = self.WAY[t]
+        valid = c >= 0
+        c0 = np.where(valid, c, 0)
+        nopt = valid.sum(axis=1)
+        is_straight = self.WAYS4 == dr[:, None]
+        rev = self.OPP[dr]
+        is_rev = self.WAYS4 == rev[:, None]
+        moving = dr != 4
+        S = np.zeros(c.shape, dtype=float)
+        self._view("", S, c0, valid, t, is_straight, is_rev, moving, p, pd, fr, rf, nopt)
+        self._view("then_", S, c0, valid, t, is_straight, is_rev, moving, q, qd, fr, rf, nopt)
+        # the exact chase value of each way, straight-line cues
+        col = p[:, None]
+        ex = self.EX[col, c0]
+        best_ex = np.where(valid, ex, big).min(axis=1)[:, None]
+        is_best = ex == best_ex
+        S += w("exact") * (np.minimum(ex, 66) / 10.0)
+        S += w("exact_best") * is_best
+        S += w("exact_loss") * (np.minimum(ex - best_ex, 30) / 10.0)
+        S += w("exact_near") * (is_best & (best_ex < 33))
+        dx = (self.CX[p] - self.CX[t])[:, None]
+        dy = (self.CY[p] - self.CY[t])[:, None]
+        cuts_dx = self.DXW * dx > 0
+        cuts_dy = self.DYW * dy > 0
+        S += w("cuts_dx") * cuts_dx
+        S += w("cuts_dy") * cuts_dy
+        S += w("along_big_gap") * (((abs(dx) >= abs(dy)) & cuts_dx) | ((abs(dy) > abs(dx)) & cuts_dy))
+        S += w("line_dist") * np.sqrt((self.CX[c0] - self.CX[p][:, None]) ** 2 + (self.CY[c0] - self.CY[p][:, None]) ** 2)
+        S += w("same_as_two_ago") * (self.WAYS4 == two[:, None])
+        a1 = self.AHEAD1[p, pd]
+        S += w("pm_exact") * (np.minimum(self.EX[a1[:, None], c0], 66) / 10.0)
+        S += w("pm_dist_after") * self.PD40[c0, a1[:, None]]
+        # timing
+        calm = ~fr
+        g99 = self.PD99[c0, col]
+        forward = valid & ~is_rev
+        has_fwd = forward.any(axis=1)
+        d_fwd = np.where(forward, g99, 99).min(axis=1)
+        back = valid & is_rev
+        has_rev = back.any(axis=1)
+        d_rev = np.where(back, g99, 99).min(axis=1)
+        rev_closer = d_rev < d_fwd
+        gap = self.PD99[t, p]
+        could = has_rev & moving & has_fwd
+        nearer = rev_closer & calm
+        BK = self.BK
+        b_spr, b_spt = BK[np.minimum(spr, 10)], BK[np.minimum(spt, 10)]
+        u = self.W_U_PR[b_spr] + self.W_U_OR[BK[np.minimum(sor, 10)]] + self.W_U_PT[b_spt]
+        u = u + nearer * (w("u_nearer") + self.W_U_AWAY[np.minimum(away, 3)] + w("u_nearer_pacrev23") * ((spr >= 2) & (spr <= 5)))
+        u += fr * (w("u_frightened") + w("u_frightened_near") * (gap <= 6))
+        u += self.ROW23[t] * (w("u_row23") + w("u_row23_recent") * (sor <= 5))
+        u += w("u_junction") * (nopt >= 3)
+        u += w("u_gap_mid") * ((gap >= 7) & (gap <= 15)) + w("u_gap_far") * (gap > 15)
+        u += w("u_pac_coming") * (self.PD99[a1, t] < gap)
+        turn_round = back & could[:, None]
+        S += turn_round * u[:, None]
+        near99 = np.where(valid, g99, big).min(axis=1)
+        turning = valid & ~turn_round & ~is_straight
+        S += (turning & (g99 == near99[:, None]) & calm[:, None]) * self.W_T[b_spt][:, None]
+        s = self.W_S[BK[np.minimum(sot, 10)]] + nearer * self.W_S_AWAY[np.minimum(away, 2)]
+        S += (is_straight & valid) * s[:, None]
+        return S, valid, could, rev_closer
+
+    def odds(self, S, valid):
+        np = self.np
+        S = np.where(valid, S, -1e18)
+        S = S - S.max(axis=1, keepdims=True)
+        p = np.exp(S) * valid
+        return p / p.sum(axis=1, keepdims=True)
+
+    # ---- the cloud ----------------------------------------------------------
+    def root(self, ghost, track, K):
+        """K ghosts where the real one is: `ghost` = (tile, previous tile,
+        frame of its last move, has left the house), `track` = _CloudTrack.fields()."""
+        np = self.np
+        tile, prev, last, left = ghost
+        row = [0] * _CF_COUNT
+        row[_CF_TILE], row[_CF_PREV], row[_CF_LAST], row[_CF_LEFT], row[_CF_ALIVE] = tile, prev, last, int(left), 1
+        heading = self.DIRIDX.get((prev, tile), 4) if prev != tile else 4
+        if heading == 4 and prev != tile and left:
+            heading = track[13]  # (through the tunnel: the two tiles are not side by side)
+        row[_CF_DIR] = heading
+        row[_CF_SPR:_CF_SPR + 7] = track[:7]
+        row[_CF_H1P:_CF_H1P + 6] = track[7:13]
+        return np.tile(np.array(row, dtype=np.int64), (1, K, 1))
+
+    def advance(self, A, step, sdir, now, P2, draws):
+        """Every ghost of every cloud in `A` ([lines, K, fields]) over one move
+        of Pac-Man: he steps to `step` (heading `sdir`) at frame `now`, with
+        power until `P2` - one entry per line. `draws`: two rows of K numbers
+        between 0 and 1, the luck of each ghost for its (at most two) moves.
+        Returns the new array; a ghost that catches him has "alive" 0 from
+        then on."""
+        np = self.np
+        planner = self.planner
+        E, K, _ = A.shape
+        a = A.reshape(E * K, _CF_COUNT).copy()
+        stp = np.repeat(step, K)
+        sd = np.repeat(sdir, K)
+        P = np.repeat(P2, K)
+        PAC, GH, GHF, RESPAWN, HEAD = planner.PAC, planner.GH, planner.GHF, planner.RESPAWN, planner.HEAD
+        home = self.HOME0
+        alive = a[:, _CF_ALIVE] == 1
+        on = alive & (a[:, _CF_TILE] == stp)
+        if on.any():
+            eat = on & (now < P)
+            die = on & ~eat
+            a[die, _CF_ALIVE] = 0
+            if eat.any():
+                a[eat, _CF_TILE] = home
+                a[eat, _CF_PREV] = home
+                a[eat, _CF_LAST] = now + RESPAWN
+                a[eat, _CF_LEFT] = 0
+                a[eat, _CF_DIR] = 4
+        end = now + PAC
+        again = None
+        for rnd in (0, 1):
+            last = a[:, _CF_LAST]
+            due = np.where(last + GHF >= P, np.maximum(last + GH, P), last + GHF)
+            if rnd == 0:
+                due = np.maximum(due, HEAD)
+                due = np.where(due <= now, now + 1, due)
+                m = (a[:, _CF_ALIVE] == 1) & (due <= end)
+            else:
+                m = again & (a[:, _CF_ALIVE] == 1) & (due <= end)
+            if not m.any():
+                break
+            rows = np.nonzero(m)[0]
+            d = due[rows]
+            tile = a[rows, _CF_TILE]
+            left = a[rows, _CF_LEFT] == 1
+            frightened = d < P[rows]
+            s_here = stp[rows]
+            nt = np.empty_like(tile)
+            ndir = np.empty_like(tile)
+            # in the house: the walk out
+            inside = ~left
+            if inside.any():
+                nt[inside] = self.EXIT[tile[inside]]
+                ndir[inside] = self.EXITDIR[tile[inside]]
+            if left.any():
+                sub = rows[left]
+                pd = sd[sub]
+                pac = stp[sub]
+                # Pac-Man's turns, as seen at this move
+                lpd = a[sub, _CF_LPD]
+                first = lpd == 5
+                changed = ~first & (pd != lpd) & (pd != 4)
+                turned_round = changed & (pd == self.OPP[np.minimum(lpd, 4)])
+                spt = np.where(changed, 0, a[sub, _CF_SPT])
+                spr = np.where(turned_round, 0, a[sub, _CF_SPR])
+                lpd = np.where(first | changed, pd, lpd)
+                t_ms = d[left] * 1000 // FPS
+                recent = t_ms - a[sub, _CF_H2T] < 800
+                q = np.where(recent, a[sub, _CF_H2P], pac)
+                qd = np.where(recent, a[sub, _CF_H2D], pd)
+                fr = frightened[left]
+                rf = np.where(fr, np.clip((P[sub] * 1000 // FPS - t_ms) / float(POWER_DURATION), 0.0, 1.0), 0.0)
+                t = tile[left]
+                dr = a[sub, _CF_DIR]
+                sor, sot, away = a[sub, _CF_SOR], a[sub, _CF_SOT], a[sub, _CF_AWAY]
+                S, valid, could, rev_closer = self.scores(t, dr, pac, pd, q, qd, fr, rf, spr, spt, sor, sot, away, a[sub, _CF_TWO])
+                p = self.odds(S, valid)
+                top = p.argmax(axis=1)
+                u = np.tile(draws[rnd], E)[sub]
+                pick = (np.cumsum(p, axis=1) < u[:, None]).sum(axis=1)
+                pick = np.where(pick > 3, top, pick)
+                pick = np.where(valid[np.arange(len(pick)), pick], pick, top)
+                if PACMAN_CLOUD_FAVOURITE:
+                    pick = np.where(sub % K == 0, top, pick)
+                stuck = ~valid.any(axis=1)
+                to = self.WAY[t, pick]
+                nt[left] = np.where(stuck, t, to)
+                ndir[left] = pick
+                # the counters, as the ghost's move is made (_CloudTrack.observe)
+                rev = self.OPP[dr]
+                chose_rev = pick == rev
+                away = np.where(could, np.where(rev_closer & ~chose_rev, away + 1, 0), away)
+                away = np.where(chose_rev, 0, away)
+                a[sub, _CF_AWAY] = away
+                a[sub, _CF_SOR] = np.where(chose_rev, 0, sor + 1)
+                a[sub, _CF_SOT] = np.where(pick != dr, 0, sot + 1)
+                a[sub, _CF_SPR] = spr + 1
+                a[sub, _CF_SPT] = spt + 1
+                a[sub, _CF_LPD] = lpd
+                a[sub, _CF_TWO] = dr
+                a[sub, _CF_H2P], a[sub, _CF_H2D], a[sub, _CF_H2T] = a[sub, _CF_H1P], a[sub, _CF_H1D], a[sub, _CF_H1T]
+                a[sub, _CF_H1P], a[sub, _CF_H1D], a[sub, _CF_H1T] = pac, pd, t_ms
+            stay = nt == tile
+            hit = ~stay & (nt == s_here)
+            eaten = hit & frightened
+            caught = hit & ~frightened
+            move = ~stay & ~hit
+            a[rows[stay], _CF_LAST] = d[stay]
+            if caught.any():
+                a[rows[caught], _CF_ALIVE] = 0
+            if eaten.any():
+                r = rows[eaten]
+                a[r, _CF_TILE] = home
+                a[r, _CF_PREV] = home
+                a[r, _CF_LAST] = d[eaten] + RESPAWN
+                a[r, _CF_LEFT] = 0
+                a[r, _CF_DIR] = 4
+            if move.any():
+                r = rows[move]
+                a[r, _CF_PREV] = tile[move]
+                a[r, _CF_TILE] = nt[move]
+                a[r, _CF_LAST] = d[move]
+                a[r, _CF_LEFT] = (left[move] | ~self.HOUSE[nt[move]]).astype(np.int64)
+                a[r, _CF_DIR] = ndir[move]
+            if rnd == 0:
+                # the faster ghost: about once in eleven of his moves it gets a second one in
+                again = np.zeros(E * K, dtype=bool)
+                again[rows[move]] = (d[move] == now + 1) & (d[move] + GH <= end)
+                if not again.any():
+                    break
+        return a.reshape(E, K, _CF_COUNT)
+
 
 _PLAN_CAUGHT = "caught"
 _PLANNER = None
@@ -5532,16 +6129,24 @@ class _PlanModel(object):
     """One picture of how the player's ghost moves: for each (its tile,
     Pac-Man's tile) the tile it steps to - a table keyed tile * N +
     Pac-Man's tile, filled in as it is asked for. These ghosts move the
-    same way frightened or not, so `scared` is the same table."""
+    same way frightened or not, so `scared` is the same table.
 
-    def __init__(self, name, key=None, static=False):
+    A fitted model (`weights`) looks at the whole position, so its move is
+    worked out each time (_Planner.fitted_step); its tables are the saved
+    moves table used beyond PACMAN_PLANNER_FITTED_DEPTH."""
+
+    def __init__(self, name, key=None, static=False, weights=None):
         self.name = name
         self.key = key  # (chase weight, exit weight): see simple_player_ghost_step
         self.static = static  # a ghost that never leaves the house
+        self.weights = weights
+        self.cloud = None  # a _Cloud: this picture is a cloud of likely ghosts (see PACMAN_CLOUD)
+        self.ff = None  # the weights laid out for fitted_step
+        self.moves = {}  # its moves worked out so far, by everything they depend on
         # how to name this picture to the search process (see _PlanWorker)
-        self.spec = ("static",) if static else ("chaser", key)
+        self.spec = ("static",) if static else ("fitted", name) if weights is not None else ("chaser", key)
         self.normal = {}
-        self.scared = self.normal
+        self.scared = {} if weights is not None else self.normal
 
 
 class _Planner(object):
@@ -5592,6 +6197,14 @@ class _Planner(object):
         self.rel = [0, 0, 0, 0, 0]
         self.model = None
         self._models = {}
+        # The power pellets in the order the game's own set gives them: a
+        # fitted model breaks a tie between two of them by that order.
+        self.pp_order = ()
+        self._pp_tuples = {}
+        self._pp_lists = {}
+        self.ff_ready = False
+        self.ff_hits = self.ff_misses = 0
+        self.WC = None
 
     # ---- pictures of the player's ghost ----------------------------------
     def chaser(self, key):
@@ -5600,6 +6213,688 @@ class _Planner(object):
         if model is None:
             model = self._models[name] = _PlanModel(name, key=key)
         return model
+
+    def fitted(self, name, weights=None):
+        """The picture of the ghost given by a fitted model: the saved version
+        `name`, or `weights` under that name. None if it cannot be had (no
+        such file, or no numpy for its tables)."""
+        model = self._models.get(name)
+        if model is not None and (weights is None or model.weights is weights):
+            return model
+        if name in self._models and weights is None:
+            return None
+        if weights is None:
+            weights = load_assumed_player_weights(name)
+        if weights is not None and not self.ff_ready:
+            try:
+                self._ff_setup()
+            except ImportError:
+                weights = None
+        if weights is None:
+            self._models[name] = None
+            return None
+        model = self._models[name] = _PlanModel(name, key=(-1.0, 0.0), weights=weights)
+        # the model's saved moves table, for the far end of a plan
+        try:
+            with open(os.path.join(PLAYER_GHOST_VERSIONS_DIR, name + "_hops.json")) as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            data = {}
+        idx, N = self.idx, self.N
+        for part, table in (("normal", model.normal), ("frightened", model.scared)):
+            for key, step in (data.get(part) or {}).items():
+                gx, gy, px, py = (int(v) for v in key.split(","))
+                a, b, c = idx.get((gx, gy)), idx.get((px, py)), idx.get(tuple(step))
+                if a is not None and b is not None and c is not None:
+                    table[a * N + b] = c
+        return model
+
+    def _pp_new_order(self):
+        """The power pellets' order has changed (a new game): forget what
+        was worked out with the old one."""
+        self._pp_tuples = {}
+        for model in self._models.values():
+            if model is not None and model.weights is not None:
+                model.moves.clear()
+
+    def worst_case(self):
+        """WC[his tile][ghost tile]: the moves he can be sure of against a
+        ghost that plays perfectly from there (see _worst_case_table), by the
+        planner's tile numbers; None without the table."""
+        if self.WC is None:
+            tables = _worst_case_table()
+            if tables is None:
+                self.WC = False
+            else:
+                rows, index = tables
+                pos = [index.get(t) for t in self.tiles]
+                self.WC = [[999 if (a is None or b is None) else rows[a][b] for b in pos] for a in pos]
+        return self.WC or None
+
+    # ---- a fitted model's move ---------------------------------------------
+    # The same answer as fast_player_ghost_direction (same terms, added in
+    # the same order, same tie-breaks; compared on 419,629 positions out of
+    # real searches without a difference), from tables indexed the
+    # planner's way: nothing is looked up by coordinates that can be looked
+    # up by number, and the "room" inputs are bit masks instead of arrays.
+    # Change either and the comparison has to be run again.
+    def _ff_setup(self):
+        import numpy as np
+        self.np = np
+        N = self.N
+        self.NBYTES = (N + 7) // 8
+        self.PD = np.full((N, N), 999, dtype=np.int64)
+        self.PDL = [[999] * N for _ in range(N)]
+        for a, row in PACMAN_DISTANCE_TABLE.items():
+            ia = self.idx[a]
+            for b, dist in row.items():
+                self.PD[ia, self.idx[b]] = dist
+                self.PDL[ia][self.idx[b]] = dist
+        self.ff_ways = {}
+        self.ff_gd = {}
+        self.ff_exits = {}
+        self.ff_head = {}
+        self.ff_ev = {}
+        self.ff_first = {}
+        self.ff_free = {}
+        self.ff_room = _room_tables()
+        if not _PLAIN_EVASION:
+            _PLAIN_EVASION.append(_evasion_table(None))
+        self.ff_ready = True
+
+    def _ff_mask(self, array):
+        return int.from_bytes(self.np.packbits(array).tobytes(), "big")
+
+    def fitted_step(self, model, tile, prev, pac, pacdir, g, d, P, pm, ppm):
+        """Where the fitted model steps (see _fitted_move), remembered: one
+        search after another goes over much the same few seconds of the
+        game, so most of what is asked has been asked before."""
+        key = (
+            tile, prev, pac, pacdir, g[1][0], g[2][0], g[3][0], g[4][0],
+            (P, d) if d < P else None, pm & ~ppm, ppm,
+        )
+        cache = model.moves
+        nt = cache.get(key)
+        if nt is None:
+            if len(cache) > 200000:
+                cache.clear()
+            nt = cache[key] = self._fitted_move(model, tile, prev, pac, pacdir, g, d, P, pm, ppm)
+            self.ff_misses += 1
+        else:
+            self.ff_hits += 1
+        return nt
+
+    def _fitted_move(self, model, tile, prev, pac, pacdir, g, d, P, pm, ppm):
+        if not self.ff_ready:
+            self._ff_setup()
+        XY = self.tiles
+        plan = model.ff
+        if plan is None:
+            w = model.weights
+            plan = model.ff = (
+                tuple(w.get(name, 0.0) or 0.0 for name in PLAYER_GHOST_FEATURE_NAMES[:18]),
+                tuple((i, w[name]) for i, name in enumerate(PLAYER_GHOST_HUNT_NAMES) if w.get(name, 0.0) != 0.0),
+                any(w.get(name, 0.0) != 0.0 for name in _PLAYER_GHOST_ROOM_NAMES),
+            )
+        base, hunt_weights, wants_room = plan
+        (w_pacman, w_lead, w_blinky, w_pinky, w_inky, w_clyde, w_exit, w_reversal, w_pacman_c, w_lead_c, w_exit_c,
+         w_coverage, w_uncovered, w_guard, w_fraction, w_urgency, w_straight, w_nearest) = base
+        ways = self.ff_ways.get(tile)
+        if ways is None:
+            here = XY[tile]
+            found = []
+            for way in CARDINALS:
+                to = step_position(here, way)
+                if is_open(*to) and to not in HOUSE_TILES:
+                    found.append((way, self.idx[to], to[0], to[1]))
+            ways = self.ff_ways[tile] = tuple(found)
+        if not ways:
+            return tile
+        direction = self.DIRS[(prev, tile)] if prev != tile else (0, 0)
+        frightened = d < P
+        pac_xy = XY[pac]
+        gd = self.ff_gd.get(pac)
+        if gd is None:
+            row = bfs_distances(pac_xy)
+            unreachable = len(row) + 1
+            gd = self.ff_gd[pac] = [row.get(t, unreachable) for t in XY]
+        lead_x = pac_xy[0] + pacdir[0] * 4
+        lead_y = pac_xy[1] + pacdir[1] * 4
+        exits = self.ff_exits.get(pac)
+        if exits is None:
+            exits = self.ff_exits[pac] = tuple(_outside_neighbours(pac_xy))
+        reverse = (-direction[0], -direction[1]) if direction != (0, 0) else None
+        allies = (XY[g[1][0]], XY[g[2][0]], XY[g[3][0]], XY[g[4][0]])
+        limit = CORNER_GHOST_DISTANCE
+        cornered = False
+        if w_pacman_c or w_lead_c or w_exit_c:
+            if not exits:
+                cornered = True
+            else:
+                hx, hy = XY[tile]
+                safest = -1
+                for ex, ey in exits:
+                    near = (ex - hx) ** 2 + (ey - hy) ** 2
+                    for ax, ay in allies:
+                        other = (ex - ax) ** 2 + (ey - ay) ** 2
+                        if other < near:
+                            near = other
+                    if near > safest:
+                        safest = near
+                cornered = safest <= limit
+        guard_x = guard_y = None
+        if w_guard and ppm:
+            pps = self._pp_tuples.get(ppm)
+            if pps is None:
+                pps = self._pp_tuples[ppm] = tuple(XY[i] for i in self.pp_order if ppm >> i & 1)
+            if pps:
+                guard_x, guard_y = min(pps, key=lambda t: (t[0] - lead_x) ** 2 + (t[1] - lead_y) ** 2)
+        remaining_fraction = 0.0
+        if frightened and POWER_DURATION > 0:
+            remaining_fraction = max(0.0, min(1.0, (P * 1000 // FPS - d * 1000 // FPS) / POWER_DURATION))
+        gaps = [gd[way[1]] for way in ways]
+        nearest = min(gaps)
+        moving = direction != (0, 0)
+        hunt = None
+        if hunt_weights:
+            # (player_ghost_hunt_terms)
+            PDL = self.PDL
+            far = 999
+            to_pacman = PDL[pac]
+            rows = [PDL[way[1]] for way in ways]
+            d_pac = [to_pacman[way[1]] for way in ways]
+            back = (-direction[0], -direction[1])
+            near_all = min(d_pac)
+            near_forward = min([d_pac[k] for k, way in enumerate(ways) if way[0] != back] or d_pac)
+            no_forward = all(way[0] == back for way in ways)
+            junction = 1.0 if len(ways) >= 3 else 0.0
+            heading = self.ff_head.get((pac, pacdir))
+            if heading is None:
+                ahead, behind, straight_on, lead3, lead6, lead10 = _pacman_heading(pac_xy, pacdir)
+                heading = self.ff_head[(pac, pacdir)] = (
+                    self.idx[ahead], self.idx[behind], -1 if straight_on is None else self.idx[straight_on],
+                    self.idx[lead3], self.idx[lead6], self.idx[lead10],
+                )
+            ahead, behind, straight_on, lead3, lead6, lead10 = heading
+            ordinary = pm & ~ppm
+            means = None
+            if ordinary:
+                np = self.np
+                count = bin(ordinary).count("1")
+                vec = np.unpackbits(
+                    np.frombuffer(ordinary.to_bytes(self.NBYTES, "little"), dtype=np.uint8), bitorder="little",
+                )[:self.N].astype(np.int64)
+                PD = self.PD
+                means = [int(PD[way[1]].dot(vec)) / count for way in ways]
+            hunt = []
+            if frightened:
+                for k, way in enumerate(ways):
+                    row = rows[k]
+                    gap = d_pac[k]
+                    straight = 1.0 if way[0] == direction else 0.0
+                    hunt.append((
+                        0.0, 0.0, 0.0, 0.0, 0.0,
+                        float(row[lead3]), float(row[lead6]), float(row[lead10]),
+                        1.0 if ((no_forward or way[0] != back) and gap == near_forward) else 0.0,
+                        junction if gap == near_all else 0.0, straight * junction,
+                        float(gap), float(gap if gap < 12 else 12), straight,
+                        0.0, 0.0, 0.0, 0.0,
+                        0.0 if means is None else means[k],
+                        0.0, 0.0, 0.0, 0.0,
+                    ))
+            else:
+                ev = self.ff_ev.get(pac)
+                if ev is None:
+                    evasion_row = _PLAIN_EVASION[0].get(pac_xy) or {}
+                    ev = self.ff_ev[pac] = [float(min(evasion_row.get(t, 0), 120)) for t in XY]
+                evasion = [ev[way[1]] for way in ways]
+                ahead_d = [row[ahead] for row in rows]
+                best_evasion = min(evasion)
+                best_ahead = min(ahead_d)
+                pacman_to_ahead = to_pacman[ahead] * PACMAN_MOVE_DELAY
+                pacman_to_behind = to_pacman[behind] * PACMAN_MOVE_DELAY
+                closing = 0.0
+                if straight_on >= 0 and PDL[straight_on][tile] < to_pacman[tile]:
+                    closing = 1.0
+                rooms = None
+                if wants_room and self.ff_room is not None:
+                    np, index, pacman_ms, player_ms, classic_ms = self.ff_room
+                    p = index.get(pac_xy)
+                    if p is not None:
+                        free = -1
+                        for k in range(1, 5):
+                            a = g[k][0]
+                            mask = self.ff_free.get((pac, a))
+                            if mask is None:
+                                i = index.get(XY[a])
+                                if i is None:
+                                    reach = classic_ms[index[HOUSE_EXIT_TARGET]] + 2 * AI_GHOST_MOVE_DELAY
+                                else:
+                                    reach = classic_ms[i]
+                                mask = self.ff_free[(pac, a)] = self._ff_mask(pacman_ms[p] < reach)
+                            free &= mask
+                        rooms = []
+                        for way in ways:
+                            c = way[1]
+                            if c == pac:
+                                rooms.append((0.0, 0.0))
+                                continue
+                            first = self.ff_first.get((pac, c))
+                            if first is None:
+                                i = index.get(XY[c])
+                                if i is None:
+                                    first = (0, -1)
+                                else:
+                                    array = pacman_ms[p] < player_ms[i] + GHOST_MOVE_DELAY
+                                    first = (self._ff_mask(array), int(array.sum()))
+                                self.ff_first[(pac, c)] = first
+                            if first[1] < 0:
+                                rooms.append((0.0, 0.0))
+                            else:
+                                rooms.append((first[1] / 10.0, bin(first[0] & free).count("1") / 10.0))
+                        least_alone = min(r[0] for r in rooms)
+                        least_all = min(r[1] for r in rooms)
+                for k, way in enumerate(ways):
+                    row = rows[k]
+                    gap = d_pac[k]
+                    behind_d = row[behind]
+                    u_turn = 1.0 if way[0] == back else 0.0
+                    hunt.append((
+                        evasion[k] / 10.0,
+                        float(ahead_d[k]), 1.0 if ahead_d[k] * GHOST_MOVE_DELAY <= pacman_to_ahead else 0.0,
+                        float(behind_d), 1.0 if behind_d * GHOST_MOVE_DELAY <= pacman_to_behind else 0.0,
+                        float(row[lead3]), float(row[lead6]), float(row[lead10]),
+                        1.0 if ((no_forward or way[0] != back) and gap == near_forward) else 0.0,
+                        junction if gap == near_all else 0.0, (1.0 if way[0] == direction else 0.0) * junction,
+                        0.0, 0.0, 0.0,
+                        1.0 if evasion[k] == best_evasion else 0.0, 1.0 if ahead_d[k] == best_ahead else 0.0,
+                        u_turn * closing, u_turn * (1.0 - closing),
+                        0.0 if means is None else means[k],
+                    ) + ((0.0, 0.0, 0.0, 0.0) if rooms is None else (
+                        rooms[k][0], rooms[k][1],
+                        1.0 if rooms[k][0] == least_alone else 0.0, 1.0 if rooms[k][1] == least_all else 0.0,
+                    )))
+        open_exits = None
+        if w_uncovered:
+            open_exits = [
+                (ex, ey) for ex, ey in exits
+                if not any((ax - ex) ** 2 + (ay - ey) ** 2 <= limit for ax, ay in allies)
+            ]
+        best_tile, best_score = ways[0][1], float("-inf")
+        for k, (way, c, cx, cy) in enumerate(ways):
+            dist_pacman = gaps[k]
+            dist_lead = (cx - lead_x) ** 2 + (cy - lead_y) ** 2
+            dist_exit = 0
+            if exits:
+                dist_exit = min([(cx - ex) ** 2 + (cy - ey) ** 2 for ex, ey in exits])
+            score = 0
+            if w_pacman:
+                score += w_pacman * dist_pacman
+            if w_lead:
+                score += w_lead * dist_lead
+            if w_blinky:
+                score += w_blinky * ((cx - allies[0][0]) ** 2 + (cy - allies[0][1]) ** 2)
+            if w_pinky:
+                score += w_pinky * ((cx - allies[1][0]) ** 2 + (cy - allies[1][1]) ** 2)
+            if w_inky:
+                score += w_inky * ((cx - allies[2][0]) ** 2 + (cy - allies[2][1]) ** 2)
+            if w_clyde:
+                score += w_clyde * ((cx - allies[3][0]) ** 2 + (cy - allies[3][1]) ** 2)
+            if w_exit:
+                score += w_exit * dist_exit
+            if w_reversal:
+                score += w_reversal * (1.0 if way == reverse else 0.0)
+            if w_pacman_c:
+                score += w_pacman_c * (dist_pacman if cornered else 0.0)
+            if w_lead_c:
+                score += w_lead_c * (dist_lead if cornered else 0.0)
+            if w_exit_c:
+                score += w_exit_c * (dist_exit if cornered else 0.0)
+            if w_coverage:
+                score += w_coverage * sum([1 for ex, ey in exits if (cx - ex) ** 2 + (cy - ey) ** 2 <= limit])
+            if w_uncovered:
+                score += w_uncovered * sum([1 for ex, ey in open_exits if (cx - ex) ** 2 + (cy - ey) ** 2 > limit])
+            if w_guard:
+                score += w_guard * (10_000 if guard_x is None else (cx - guard_x) ** 2 + (cy - guard_y) ** 2)
+            if w_fraction:
+                score += w_fraction * remaining_fraction
+            if w_urgency:
+                score += w_urgency * (dist_pacman * (1.0 - remaining_fraction) if frightened else 0.0)
+            if w_straight:
+                score += w_straight * (1.0 if (moving and way == direction) else 0.0)
+            if w_nearest:
+                score += w_nearest * (1.0 if dist_pacman <= nearest else 0.0)
+            if hunt is not None:
+                values = hunt[k]
+                for index_, weight in hunt_weights:
+                    score += weight * values[index_]
+            if score > best_score:
+                best_score, best_tile = score, c
+        return best_tile
+
+    # ---- planning against a cloud of likely ghosts (see PACMAN_CLOUD) -------
+    def cloud_model(self, name):
+        """The picture of a person's ghost given by a timed-odds model file
+        (player_ghost_versions/<name>.json); None if it cannot be had."""
+        key = "cloud " + name
+        if key in self._models:
+            return self._models[key]
+        model = None
+        try:
+            with open(os.path.join(PLAYER_GHOST_VERSIONS_DIR, name + ".json")) as handle:
+                data = json.load(handle)
+            weights = {n: w / s for n, w, s in zip(data["names"], data["weights"], data["scale"]) if w}
+            if not self.ff_ready:
+                self._ff_setup()
+            model = _PlanModel(key, key=(-1.0, 0.0))
+            import numpy  # noqa: F401 (the cloud cannot be worked out without it)
+            model.cloud = _CloudLater(self, weights)
+            model.spec = ("cloud", name)
+        except (OSError, ValueError, KeyError, ImportError):
+            model = None
+        self._models[key] = model
+        return model
+
+    def search_cloud(self, state, track, forced, width, per_tile, deadline=None, marks=False):
+        """Beam search against the cloud. `state` is the game at his decision
+        (the real ghost where it stands), `track` the _CloudTrack fields then,
+        `forced` the step he has already taken from there (None: none yet).
+        Returns (kind, steps, search steps, depth, eaten) as search() does;
+        the steps begin with `forced`. With `marks` it stops where the cloud
+        does and returns kind "marks" and, in place of the steps, one
+        (tile, risk) for each way open to him at his next decision: the
+        share of the cloud's ghosts that catch him within the search's depth
+        on the line from there that loses fewest (1.0: no line survives)."""
+        cloud = self.model.cloud = self.model.cloud.built()
+        np = cloud.np
+        pos, g, perc, P, now, pm, ppm = state
+        K = PACMAN_CLOUD_K
+        NB, BIT, PAC, POWER, GH, NBMASK = self.NB, self.BIT, self.PAC, self.POWER, self.GH, self.NBMASK
+        ply, nearest = self.ply, self.nearest
+        w_gap, gap_cap, w_risk, w_near = PACMAN_PLANNER_GAP, PACMAN_PLANNER_GAP_CAP, PACMAN_PLANNER_RISK, PACMAN_PLANNER_NEAR
+        w_risk_now, w_pp, w_death = PACMAN_PLANNER_RISK_NOW, PACMAN_CLOUD_PP, PACMAN_CLOUD_DEATH
+        w_wc, wc_safe, wc_near, wc_far = (
+            PACMAN_PLANNER_WC, PACMAN_PLANNER_WC_SAFE, PACMAN_PLANNER_WC_NEAR, PACMAN_PLANNER_WC_FAR,
+        )
+        WCm = cloud.WCm if w_wc else None
+        GDm, PD = cloud.GDm, cloud.PD999
+        DIRIDX = cloud.DIRIDX
+        rng = np.random.RandomState(12345)  # the same luck in every search: lines are compared like with like
+        A = cloud.root(g[0], track, K)
+        total = bin(pm).count("1")
+        pp_tiles = [i for i in range(self.N) if ppm >> i & 1]
+        # node: as in search()
+        # (two more for a line of the cloud: his step at the decision the marks are for, the share lost so far)
+        root = (0.0, pos, g, perc, P, pm, ppm, 0, None, -1, 0.0, bin(ppm).count("1"), -1, 0.0)
+        level = [root]
+        best_seen = root
+        nodes = depth = 0
+        stale = self.STALE
+        ghost_frames = float(GH)
+        mark_depth = 0 if forced is None else 1
+        mark_ways = None
+        lasted = {}  # way at the marked decision -> how deep some line down it got with him alive
+        cloud_depth = PACMAN_CLOUD_DEPTH + mark_depth if marks else PACMAN_CLOUD_DEPTH
+        while now < stale and depth < cloud_depth:
+            later = now + PAC
+            pend, par, step_l, sdir_l, P2_l = [], [], [], [], []
+            for row, node in enumerate(level):
+                _score, pos, g, perc, P, pm, ppm, eaten, _parent, _step, riskacc, npp_here = node[:12]
+                if depth == mark_depth and mark_ways is None:
+                    mark_ways = NB[pos]
+                for step in NB[pos]:
+                    if depth == 0 and forced is not None and step != forced:
+                        continue
+                    bit = BIT[step]
+                    P2, pm2, ppm2, e2, npp = P, pm, ppm, eaten, npp_here
+                    if pm & bit:
+                        pm2 = pm ^ bit
+                        e2 += 1
+                        if ppm & bit:
+                            ppm2 = ppm ^ bit
+                            P2 = now + POWER
+                            npp -= 1
+                    r = ply(pos, step, g, perc, P2, now, pm2, ppm2, False, True)
+                    nodes += 1
+                    if r is None:
+                        continue
+                    if pm2 == 0 and not marks:
+                        ghosts = A[row]
+                        there = (ghosts[:, _CF_ALIVE] == 1) & (ghosts[:, _CF_TILE] == step)
+                        if now < P2 or 2 * int(there.sum()) <= int((ghosts[:, _CF_ALIVE] == 1).sum()):
+                            return "clear", self._path(node) + [step], nodes, depth + 1, e2
+                        continue
+                    if r is _PLAN_CAUGHT:
+                        continue
+                    g2, perc2, risk = r
+                    r2 = riskacc
+                    if risk:
+                        r2 += risk * (w_risk_now if depth == 0 else w_risk if depth < 3 else w_risk * 0.1)
+                    left = total - e2 - npp
+                    base = (
+                        100.0 * e2 - w_near * (1 if NBMASK[step] & pm2 else nearest(step, pm2))
+                        + w_pp * npp * (left / 40.0 if left < 40 else 1.0)
+                    )
+                    par.append(row)
+                    step_l.append(step)
+                    sdir_l.append(DIRIDX.get((pos, step), 4))
+                    P2_l.append(P2)
+                    pend.append((base, step, g2, perc2, P2, pm2, ppm2, e2, node, npp, r2))
+            if not pend:
+                level = []
+                break
+            E = len(pend)
+            par_a = np.array(par, dtype=np.int64)
+            step_a = np.array(step_l, dtype=np.int64)
+            P2_a = np.array(P2_l, dtype=np.int64)
+            before = A[par_a]
+            A2 = cloud.advance(before, step_a, np.array(sdir_l, dtype=np.int64), now, P2_a, rng.random_sample((2, K)))
+            nodes += E
+            alive = A2[:, :, _CF_ALIVE] == 1
+            n_alive = alive.sum(axis=1)
+            died = ((before[:, :, _CF_ALIVE] == 1).sum(axis=1) - n_alive) / float(K)
+            share = np.maximum(n_alive, 1).astype(float)
+            tiles2 = A2[:, :, _CF_TILE]
+            # his lead over each of them, in tiles (see gap()), averaged over those he is still alive against
+            lead = GDm[tiles2, step_a[:, None]].astype(float)
+            wait = A2[:, :, _CF_LAST] + GH - later + np.where(later < P2_a, (P2_a - later) // 3, 0)[:, None]
+            lead = np.minimum(lead + np.where(wait > 0, wait / ghost_frames, 0.0), gap_cap)
+            lead_mean = (lead * alive).sum(axis=1) / share
+            charge = w_death * died
+            if WCm is not None:
+                sure = WCm[step_a[:, None], tiles2]
+                at_risk = alive & (A2[:, :, _CF_LEFT] == 1) & (later >= P2_a)[:, None] & (sure < wc_safe)
+                if pp_tiles and at_risk.any():
+                    for b in pp_tiles:
+                        has = np.array([(item[6] >> b) & 1 for item in pend], dtype=bool)
+                        if has.any():
+                            first = (PD[step_a, b] * PAC + PAC)[:, None] < (PD[tiles2, b] - 2) * GH
+                            at_risk &= ~(first & has[:, None])  # he is on a power pellet first
+                worst = np.where(at_risk, (wc_safe - sure) / float(wc_safe), 0.0).sum(axis=1) / share
+                charge = charge + w_wc * worst * (1.0 if depth < wc_near else wc_far)
+            cand = {}
+            for e in range(E):
+                if n_alive[e] == 0:
+                    continue
+                base, step, g2, perc2, P2, pm2, ppm2, e2, node, npp, r2 = pend[e]
+                r2 += float(charge[e])
+                score = base + w_gap * float(lead_mean[e]) - r2
+                first = step if depth == mark_depth else node[12]
+                lasted[first] = depth + 1
+                key = (step, pm2, first) if marks else (step, pm2)
+                old = cand.get(key)
+                if old is None or old[0][0] < score:
+                    cand[key] = ((score, step, g2, perc2, P2, pm2, ppm2, e2, node, step, r2, npp, first, node[13] + float(died[e])), e)
+            if not cand:
+                level = []
+                break
+            items = sorted(cand.values(), key=_plan_score_first, reverse=True)
+            level, rows, count = [], [], {}
+            if marks and depth >= mark_depth:
+                # every way open at the decision keeps its share of the lines: each has to be judged
+                ways = max(1, len(set(pair[0][12] for pair in items)))
+                quota, kept, rest = max(2, width // ways), {}, []
+                for pair in items:
+                    c = kept.get(pair[0][12], 0)
+                    if c < quota:
+                        kept[pair[0][12]] = c + 1
+                        level.append(pair[0])
+                        rows.append(pair[1])
+                    else:
+                        rest.append(pair)
+                for pair in rest:
+                    if len(level) >= width:
+                        break
+                    level.append(pair[0])
+                    rows.append(pair[1])
+                items = ()
+            for item, e in items:
+                if len(level) >= width:
+                    break
+                c = count.get(item[1], 0)
+                if c >= per_tile:
+                    continue
+                count[item[1]] = c + 1
+                level.append(item)
+                rows.append(e)
+            A = A2[np.array(rows, dtype=np.int64)]
+            best_seen = level[0]
+            depth += 1
+            now += PAC
+            if deadline is not None and time.perf_counter() > deadline:
+                if marks:
+                    break
+                return "partial", self._path(best_seen), nodes, depth, best_seen[7]
+        if marks:
+            risk = {}
+            for node in level:
+                if node[12] >= 0 and node[13] < risk.get(node[12], 2.0):
+                    risk[node[12]] = node[13]
+            out = []
+            reach = float(max(1, depth))
+            for way in (mark_ways or ()):
+                if way in risk:
+                    out.append((way, min(1.0, risk[way])))
+                elif PACMAN_CLOUD_LASTING:
+                    # no line survives down this way: the sooner the end, the worse (1 to 2)
+                    out.append((way, 1.0 + max(0.0, reach - lasted.get(way, mark_depth)) / reach))
+                else:
+                    out.append((way, 1.0))
+            return "marks", out, nodes, depth, 0
+        if depth < PACMAN_CLOUD_DEPTH or best_seen is root:
+            return "partial", self._path(best_seen), nodes, depth, best_seen[7]
+        # Beyond the cloud nobody knows where a person's ghost will be: carry on with the nearest of each
+        # line's ghosts as a plain chaser (or with none), and the worst-case charge.
+        chase = PACMAN_CLOUD_FAR == "chaser"
+        WC = self.worst_case() if (w_wc and chase) else None
+        pp_lists = self._pp_lists
+        GD = self.GD
+        if chase:
+            carried = []
+            for row, node in enumerate(level):
+                ghosts = A[row]
+                live = np.nonzero(ghosts[:, _CF_ALIVE] == 1)[0]
+                k = live[np.argmin(GDm[ghosts[live, _CF_TILE], node[1]])]
+                rep = (int(ghosts[k, _CF_TILE]), int(ghosts[k, _CF_PREV]), int(ghosts[k, _CF_LAST]), bool(ghosts[k, _CF_LEFT]))
+                carried.append(node[:2] + ((rep,) + tuple(node[2][1:]),) + node[3:])
+            level = carried
+        while now < stale and depth < PACMAN_CLOUD_TOTAL:
+            cand = {}
+            later = now + PAC
+            for node in level:
+                _score, pos, g, perc, P, pm, ppm, eaten, _parent, _step, riskacc, npp_here = node[:12]
+                for step in NB[pos]:
+                    bit = BIT[step]
+                    P2, pm2, ppm2, e2, npp = P, pm, ppm, eaten, npp_here
+                    if pm & bit:
+                        pm2 = pm ^ bit
+                        e2 += 1
+                        if ppm & bit:
+                            ppm2 = ppm ^ bit
+                            P2 = now + POWER
+                            npp -= 1
+                    r = ply(pos, step, g, perc, P2, now, pm2, ppm2, False, not chase)
+                    nodes += 1
+                    if r is None:
+                        continue
+                    if pm2 == 0:
+                        return "clear", self._path(node) + [step], nodes, depth + 1, e2
+                    if r is _PLAN_CAUGHT:
+                        continue
+                    g2, perc2, risk = r
+                    r2 = riskacc
+                    if risk:
+                        r2 += risk * w_risk * 0.1
+                    left = total - e2 - npp
+                    lead = 0.0
+                    if chase:
+                        chaser = g2[0]
+                        lead = GD[chaser[0]][step]
+                        wait = chaser[2] + GH - later
+                        if later < P2:
+                            wait += (P2 - later) // 3
+                        if wait > 0:
+                            lead += wait / ghost_frames
+                        if WC is not None and chaser[3] and later >= P2:
+                            sure = WC[step][chaser[0]]
+                            if sure < wc_safe:
+                                covered = False
+                                if ppm2:
+                                    pps = pp_lists.get(ppm2)
+                                    if pps is None:
+                                        pps = pp_lists[ppm2] = tuple(i for i in range(self.N) if ppm2 >> i & 1)
+                                    mine, theirs = self.PDL[step], self.PDL[chaser[0]]
+                                    for b in pps:
+                                        if mine[b] * PAC + PAC < (theirs[b] - 2) * GH:
+                                            covered = True
+                                            break
+                                if not covered:
+                                    r2 += w_wc * (wc_safe - sure) / wc_safe * (1.0 if depth < wc_near else wc_far)
+                    score = (
+                        100.0 * e2 - w_near * (1 if NBMASK[step] & pm2 else nearest(step, pm2))
+                        + w_gap * (lead if lead < gap_cap else gap_cap)
+                        + w_pp * npp * (left / 40.0 if left < 40 else 1.0)
+                        - r2
+                    )
+                    key = (step, pm2, g2[0][0])
+                    old = cand.get(key)
+                    if old is None or old[0] < score:
+                        cand[key] = (score, step, g2, perc2, P2, pm2, ppm2, e2, node, step, r2, npp)
+            if not cand:
+                break
+            items = sorted(cand.values(), key=_plan_score, reverse=True)
+            level = []
+            count = {}
+            for item in items:
+                if len(level) >= width:
+                    break
+                c = count.get(item[1], 0)
+                if c >= per_tile:
+                    continue
+                count[item[1]] = c + 1
+                level.append(item)
+            best_seen = level[0]
+            depth += 1
+            now += PAC
+            if deadline is not None and time.perf_counter() > deadline:
+                break
+        return "partial", self._path(best_seen), nodes, depth, best_seen[7]
+
+    def plan_cloud(self, state, track, forced, seconds=None, width=None):
+        """The plan against the cloud from `state` once he has stepped to
+        `forced`: (kind, his steps after that one, search steps used) - or,
+        with PACMAN_CLOUD_MODE "marks", ("marks", [(tile, risk), ...], search
+        steps used): see search_cloud."""
+        width = width or PACMAN_CLOUD_WIDTH
+        deadline = None if seconds is None else time.perf_counter() + seconds
+        kind, steps, nodes, depth, eaten = self.search_cloud(
+            state, track, forced, width, max(2, min(6, width // 20 + 2)), deadline, PACMAN_CLOUD_MODE == "marks")
+        self.last_key = (kind == "clear", depth, eaten)
+        if kind == "marks":
+            return kind, steps, nodes
+        if forced is not None:
+            steps = steps[1:] if steps and steps[0] == forced else []
+        return kind, steps, nodes
 
     def static(self):
         if "static" not in self._models:
@@ -5612,26 +6907,31 @@ class _Planner(object):
         table = model.scared if frightened else model.normal
         nt = table.get(tile * self.N + pacman)
         if nt is None:
-            if model.static:
-                nt = tile
+            if model.static or (frightened and model.weights is not None):
+                nt = tile  # (a fitted model's moves table has nothing for this while frightened: it waits)
             else:
                 nt = self.idx[simple_player_ghost_step(self.tiles[tile], self.tiles[pacman], model.key)]
             table[tile * self.N + pacman] = nt
         return nt
 
     # ---- one move of Pac-Man and all the ghosts do before his next --------
-    def ply(self, pos, step, g, perc, P, now):
+    def ply(self, pos, step, g, perc, P, now, pm=0, ppm=0, far=False, skip0=False):
         """Pac-Man steps pos -> step at frame `now` (P already counts a
         power pellet eaten there). `g` is one (tile, previous tile, frame
         of its last move, has left the house) per ghost, player ghost
         first; `perc` the classic ghosts' sighting of him (tile, direction,
         frame). None: a ghost was standing there. _PLAN_CAUGHT: one reached
         him before his next move. Else (ghosts, sighting, risk) - risk is
-        the chance that a classic ghost's random move lands on him."""
+        the chance that a classic ghost's random move lands on him.
+        `pm` / `ppm` are the pellets / power pellets left once he has
+        stepped: a fitted model of the player's ghost looks at them. With
+        `far` it is moved by its saved table instead (see
+        PACMAN_PLANNER_FITTED_DEPTH). With `skip0` the player's ghost is left
+        out altogether: a cloud of ghosts stands in for it."""
         HOME, rel = self.HOME, self.rel
         PAC, GH, GHF, AI, AIF, RESPAWN, HEAD = self.PAC, self.GH, self.GHF, self.AI, self.AIF, self.RESPAWN, self.HEAD
         g = list(g)
-        for i in range(5):
+        for i in range(1 if skip0 else 0, 5):
             if g[i][0] == step:
                 if i and now < rel[i]:
                     continue  # still caged
@@ -5647,6 +6947,7 @@ class _Planner(object):
             R = HEAD
         sdir = self.DIRS[(pos, step)]
         model = self.model
+        fitted = model.weights is not None and not far
         ev = []
         for i in range(5):
             last = g[i][2]
@@ -5659,7 +6960,7 @@ class _Planner(object):
                 if due < rel[i]:
                     due = rel[i]
             else:
-                if model.static:
+                if model.static or skip0:
                     continue
                 due = last + GHF
                 if due >= P:
@@ -5690,10 +6991,13 @@ class _Planner(object):
                     g[i] = (tile, prev, d, left)
                     continue
             elif i == 0:
-                table = model.scared if frightened else model.normal
-                nt = table.get(tile * N + step)
-                if nt is None:
-                    nt = self.step_of(model, tile, step, frightened)
+                if fitted:
+                    nt = self.fitted_step(model, tile, prev, step, sdir, g, d, P, pm, ppm)
+                else:
+                    table = model.scared if frightened else model.normal
+                    nt = table.get(tile * N + step)
+                    if nt is None:
+                        nt = self.step_of(model, tile, step, frightened)
                 if nt == tile:
                     g[i] = (tile, prev, d, left)
                     continue
@@ -5814,6 +7118,17 @@ class _Planner(object):
             PACMAN_PLANNER_GAP, PACMAN_PLANNER_GAP_CAP, PACMAN_PLANNER_PP, PACMAN_PLANNER_RISK, PACMAN_PLANNER_NEAR,
         )
         w_risk_now = PACMAN_PLANNER_RISK_NOW
+        # against a fitted model: how far it is used, and the charge for positions a ghost that leaves
+        # the model could catch him from (see PACMAN_PLANNER_FITTED)
+        fitted = self.model.weights is not None
+        if fitted:
+            w_pp = PACMAN_PLANNER_FITTED_PP
+        far_from = PACMAN_PLANNER_FITTED_DEPTH if fitted else 0
+        WC = self.worst_case() if fitted and PACMAN_PLANNER_WC else None
+        w_wc, wc_safe, wc_near, wc_far = (
+            PACMAN_PLANNER_WC, PACMAN_PLANNER_WC_SAFE, PACMAN_PLANNER_WC_NEAR, PACMAN_PLANNER_WC_FAR,
+        )
+        pp_lists = self._pp_lists
         GD, GH, NBMASK = self.GD, self.GH, self.NBMASK
         ghost_frames = float(GH)
         total = bin(pm).count("1")
@@ -5839,7 +7154,7 @@ class _Planner(object):
                             ppm2 = ppm ^ bit
                             P2 = now + POWER
                             npp -= 1
-                    r = ply(pos, step, g, perc, P2, now)
+                    r = ply(pos, step, g, perc, P2, now, pm2, ppm2, fitted and depth >= far_from)
                     nodes += 1
                     if r is None:
                         continue
@@ -5860,6 +7175,21 @@ class _Planner(object):
                         wait += (P2 - later) // 3
                     if wait > 0:
                         lead += wait / ghost_frames
+                    if WC is not None and chaser[3] and later >= P2:
+                        sure = WC[step][chaser[0]]
+                        if sure < wc_safe:
+                            covered = False
+                            if ppm2:
+                                pps = pp_lists.get(ppm2)
+                                if pps is None:
+                                    pps = pp_lists[ppm2] = tuple(i for i in range(self.N) if ppm2 >> i & 1)
+                                mine, theirs = self.PDL[step], self.PDL[chaser[0]]
+                                for b in pps:
+                                    if mine[b] * PAC + PAC < (theirs[b] - 2) * GH:
+                                        covered = True  # he is on a power pellet first
+                                        break
+                            if not covered:
+                                r2 += w_wc * (wc_safe - sure) / wc_safe * (1.0 if depth < wc_near else wc_far)
                     score = (
                         100.0 * e2 - w_near * (1 if NBMASK[step] & pm2 else nearest(step, pm2))
                         + w_gap * (lead if lead < gap_cap else gap_cap)
@@ -5901,11 +7231,13 @@ class _Planner(object):
         out.reverse()
         return out
 
-    def plan(self, state, budget, deadline=None):
+    def plan(self, state, budget, deadline=None, cap=0):
         """The best plan `budget` search steps can find: the beam is as
         wide as the budget allows for the pellets left, and what is left
         of the budget after a search that found no way to clear the maze
-        goes on a wider one. Returns (kind, steps, search steps used)."""
+        goes on a wider one. Never more than `cap` steps in all, if given
+        (a headless test's stand-in for the clock time `deadline` of a real
+        game). Returns (kind, steps, search steps used)."""
         left = bin(state[5]).count("1")
         per_level = 2.3 * (1.45 * left + 15)  # search steps one unit of beam width costs over the rest of the game
         width = max(6, min(PACMAN_PLANNER_MAX_WIDTH, int(budget / per_level)))
@@ -5913,23 +7245,68 @@ class _Planner(object):
         spent = 0
         while True:
             kind, steps, nodes, depth, eaten = self.search(
-                state, width, max(2, min(6, width // 20 + 2)), budget * 3, deadline,
+                state, width, max(2, min(6, width // 20 + 2)),
+                min(budget * 3, cap - spent) if cap else budget * 3, deadline,
             )
             spent += nodes
             key = (kind == "clear", depth, eaten)
             if best is None or key > best[0]:
                 best = (key, kind, steps)
-            if kind == "clear" or width >= PACMAN_PLANNER_MAX_WIDTH or spent * 2.5 > budget:
+            if kind == "clear" or width >= PACMAN_PLANNER_MAX_WIDTH or spent * 2.5 > budget or (cap and spent >= cap):
                 break
             if deadline is not None and time.perf_counter() > deadline:
                 break
             width = min(PACMAN_PLANNER_MAX_WIDTH, max(width * 2, int(width * (budget - spent) / max(1, nodes))))
+        self.last_key = best[0]
+        return best[1], best[2], spent
+
+    def openings(self, state, count):
+        """Up to `count` different ways for him to begin from `state` - his
+        first move, or his first two or three while there are still no
+        more than `count` of them - as (steps, the state after them,
+        pellets eaten on the way). Each is searched on its own (see
+        plan_split): several searches side by side, each from a different
+        beginning, in place of one search several times the size."""
+        front = [((), state, 0)]
+        NB, BIT = self.NB, self.BIT
+        for _ in range(3):
+            wider = []
+            for path, st, eaten in front:
+                pellets = st[5]
+                for step in NB[st[0]]:
+                    if pellets == BIT[step]:
+                        return front  # the last pellet is one step away: nothing to divide up
+                    nxt = self.after(st, step)
+                    if nxt is not None:
+                        wider.append((path + (step,), nxt, eaten + (1 if pellets & BIT[step] else 0)))
+            if not wider or len(wider) > count:
+                break
+            front = wider
+        return front
+
+    def plan_split(self, state, budget, cap, count):
+        """The best of the plans found from each of up to `count` beginnings
+        (see openings), `budget` / `cap` search steps apiece - what that
+        many search processes find between them in a real game."""
+        best = None
+        spent = 0
+        for path, st, eaten in self.openings(state, count):
+            kind, steps, nodes = self.plan(st, budget, None, cap)
+            spent += nodes
+            clear, depth, ate = self.last_key
+            key = (1, -(depth + len(path)), 0) if clear else (0, depth + len(path), ate + eaten)
+            if best is None or key > best[0]:
+                best = (key, kind, list(path) + steps)
         return best[1], best[2], spent
 
     def model_from(self, spec):
         """The picture of the ghost a (kind, key) pair names (see _PlanModel.spec)."""
         if spec[0] == "chaser":
             return self.chaser(tuple(spec[1]))
+        if spec[0] == "fitted":
+            return self.fitted(spec[1])
+        if spec[0] == "cloud":
+            return self.cloud_model(spec[1])
         return self.static()
 
     def replay(self, state, steps):
@@ -5938,6 +7315,7 @@ class _Planner(object):
         pos, g, perc, P, now, pm, ppm = state
         first_risk = 0.0
         NB, BIT = self.NB, self.BIT
+        far_from = PACMAN_PLANNER_FITTED_DEPTH if self.model.weights is not None else 1 << 30
         for n, step in enumerate(steps):
             if step not in NB[pos]:
                 return n, False, first_risk
@@ -5947,7 +7325,7 @@ class _Planner(object):
                 if ppm & bit:
                     ppm ^= bit
                     P = now + self.POWER
-            r = self.ply(pos, step, g, perc, P, now)
+            r = self.ply(pos, step, g, perc, P, now, pm, ppm, n >= far_from, self.model.cloud is not None)
             if r is None:
                 return n, False, first_risk
             if pm == 0:
@@ -5979,6 +7357,10 @@ class _Planner(object):
             _plan_frame(game.ai_perception_last_update - start),
         )
         ppm = 0
+        order = tuple(idx[t] for t in game.power_pellets)
+        if [i for i in self.pp_order if i in order] != list(order):
+            self.pp_order = order  # (a new game: eating one never changes the order of the rest)
+            self._pp_new_order()
         for t in game.power_pellets:
             ppm |= 1 << idx[t]
         pm = ppm
@@ -6001,7 +7383,7 @@ class _Planner(object):
             if ppm & bit:
                 ppm ^= bit
                 P = now + self.POWER
-        r = self.ply(pos, step, g, perc, P, now)
+        r = self.ply(pos, step, g, perc, P, now, pm, ppm, False, self.model.cloud is not None)
         if r is None or r is _PLAN_CAUGHT or pm == 0:
             return None
         return (step, r[0], r[1], P, now + self.PAC, pm, ppm)
@@ -6009,6 +7391,31 @@ class _Planner(object):
 
 def _plan_score(item):
     return item[0]
+
+
+def _plan_score_first(item):
+    return item[0][0]
+
+
+def _plan_same(a, b, cloudy):
+    """Is the game where the plan expected it? Against a cloud the player's
+    ghost itself is left out of the comparison: the plan was made for
+    wherever it might have gone."""
+    if a is None or not cloudy:
+        return a == b
+    return a[0] == b[0] and a[1][1:] == b[1][1:] and a[2:] == b[2:]
+
+
+def _cloud_step_safe(planner, state, step):
+    """False when the real ghost, where it stands now, can simply be on
+    `step` before he moves again (the plan was made a move ago, for a cloud
+    of places it might have gone to)."""
+    pos, g, perc, P, now, pm, ppm = state
+    tile, prev, last, left = g[0]
+    if not left or now < P or (ppm >> step) & 1:
+        return True
+    replies = max(1, min(2, (now - last + planner.PAC) // planner.GH))
+    return _guaranteed_moves(planner.tiles[step], planner.tiles[tile], replies) > 0
 
 
 # In a real game a search takes about as long as one of Pac-Man's moves -
@@ -6023,30 +7430,50 @@ PACMAN_PLANNER_SECONDS = float(os.environ.get("PACMAN_PLANNER_SECONDS", "0.15"))
 
 def _plan_worker_main(conn):
     """The search process: answers each (number, picture of the ghost,
-    release frames, position, seconds) with (number, kind, steps, search
+    release frames, position, seconds, power pellet order) with (number, kind, steps, search
     steps used, seconds taken). Only the newest question waiting is
     answered. Ends when the game closes the pipe or sends None."""
     try:
         planner = _planner()
+        _plan_warm()
+        if PACMAN_CLOUD:
+            model = planner.cloud_model(PACMAN_CLOUD_MODEL)
+            if model is not None:
+                model.cloud = model.cloud.built()  # (a few seconds, once, before the first question)
         conn.send(("ready", os.getpid()))
-        rate = 40000.0  # search steps a second on this machine; measured as it goes
+        rates = {}  # search steps a second on this machine, by kind of picture; measured as it goes
+        widths = {}
         while True:
             message = conn.recv()
             while conn.poll():
                 message = conn.recv()
             if message is None:
                 return
-            number, spec, rel, state, seconds = message
+            number, spec, rel, state, seconds, order = message
             planner.model = planner.model_from(spec)
             planner.rel = list(rel)
+            if tuple(order) != planner.pp_order:
+                planner.pp_order = tuple(order)
+                planner._pp_new_order()
             if planner.model is None:
                 conn.send((number, "partial", [], 0, 0.0))
                 continue
+            if spec[0] == "cloud":
+                started = time.perf_counter()
+                width = widths.get("cloud", PACMAN_CLOUD_WIDTH)
+                kind, steps, nodes = planner.plan_cloud(state[0], state[1], state[2], seconds * 1.5, width)
+                took = time.perf_counter() - started
+                # as wide a search as the thinking time allows on this machine, never wider than asked for
+                if took > 0:
+                    widths["cloud"] = int(max(8, min(PACMAN_CLOUD_WIDTH, 0.7 * width + 0.3 * width * seconds * 0.8 / took)))
+                conn.send((number, kind, steps, nodes, took))
+                continue
             started = time.perf_counter()
-            kind, steps, nodes = planner.plan(state, max(2000, int(rate * seconds)), started + seconds)
+            rate = rates.get(spec[0], 20000.0 if spec[0] == "fitted" else 40000.0)
+            kind, steps, nodes = planner.plan(state, max(1500, int(rate * seconds)), started + seconds)
             took = time.perf_counter() - started
-            if nodes >= 2000 and took > 0:
-                rate = 0.7 * rate + 0.3 * nodes / took
+            if nodes >= 1500 and took > 0:
+                rates[spec[0]] = 0.7 * rate + 0.3 * nodes / took
             conn.send((number, kind, steps, nodes, took))
     except (EOFError, OSError, KeyboardInterrupt):
         return
@@ -6072,15 +7499,15 @@ class _PlanWorker(object):
         self.nodes = 0
         self.seconds = 0.0
 
-    def ask(self, model, rel, state):
+    def ask(self, model, rel, state, root=None):
         if not self.ready:
             self.poll()
             if not self.ready:
                 return
         self.number += 1
-        self.asked = (self.number, state)
+        self.asked = (self.number, state if root is None else root)
         try:
-            self.conn.send((self.number, model.spec, list(rel), state, PACMAN_PLANNER_SECONDS))
+            self.conn.send((self.number, model.spec, list(rel), state, PACMAN_PLANNER_SECONDS, _planner().pp_order))
         except (OSError, ValueError):
             self.asked = None
 
@@ -6120,12 +7547,25 @@ class _PlanWorker(object):
             pass
 
 
+def _plan_warm():
+    """Build what planning against the fitted model needs (its tables, the
+    worst-case table by the planner's numbers) now, not at the first
+    decision that uses them: about a tenth of a second."""
+    if PACMAN_PLANNER_FITTED:
+        planner = _planner()
+        if planner.fitted(PACMAN_PLANNER_FITTED_MODEL) is not None and PACMAN_PLANNER_WC:
+            planner.worst_case()
+    if PACMAN_CLOUD:
+        _planner().cloud_model(PACMAN_CLOUD_MODEL)
+
+
 def start_plan_worker():
     """A _PlanWorker, or None if the planner is off or the process cannot
     be started (Pac-Man then plays move by move, as before)."""
     if not PACMAN_PLANNER:
         return None
     try:
+        _plan_warm()
         return _PlanWorker()
     except Exception as exc:  # no second process available: play without the planner rather than not at all
         print("Planner process not started (%s): Pac-Man plays without it." % exc, file=sys.stderr)
@@ -6202,7 +7642,14 @@ def _plan_model(game, planner, memory, now):
     if game.ghost_autoplay_weights is not None and not game.ghost_autoplay_hidden:
         key = player_ghost_policy_key(game.ghost_autoplay_weights)
         return planner.chaser(key) if key is not None else None
-    return _plan_recognise(game, planner, memory, now)
+    picture = _plan_recognise(game, planner, memory, now)
+    if picture is not None or not (PACMAN_PLANNER_FITTED or PACMAN_CLOUD):
+        return picture
+    if getattr(game, "_pg_idle", False):
+        return None  # it is standing still: the models of a person have no such ghost in them
+    if PACMAN_CLOUD:
+        return planner.cloud_model(PACMAN_CLOUD_MODEL)
+    return planner.fitted(PACMAN_PLANNER_FITTED_MODEL)
 
 
 def plan_pacman_step(game, now):
@@ -6213,6 +7660,7 @@ def plan_pacman_step(game, now):
     if memory is None:
         memory = game._plan = _plan_new_game()
     memory["by_plan"] = False
+    _CLOUD_MARKS["at"] = None
     worker = game._plan_worker
     if game._plan_live and worker is None:
         return None  # a real game without the search process: no planner
@@ -6230,12 +7678,30 @@ def plan_pacman_step(game, now):
     memory["stats"]["model"] = model.name
     planner.model = model
     state = memory["state"] = planner.state_of(game, now)
+    cloudy = model.cloud is not None
+    if cloudy:
+        track = getattr(game, "_cloud_track", None) if game.player_ghost_seen else None
+        memory["track"] = (track or _CloudTrack()).fields()
+        if PACMAN_CLOUD_MODE == "marks":
+            # he decides move by move; the cloud's marks for this decision (worked out since his last
+            # move) go into that decision's scoring (see choose_pacman_step)
+            pending = memory["pending"]
+            memory["current"] = None
+            if (pending is not None and pending["kind"] == "marks" and pending["steps"]
+                    and pending["root"] is not None and pending["root"][0] == state[0]):
+                _CLOUD_MARKS["at"] = game.pacman_position
+                _CLOUD_MARKS["risk"] = {planner.tiles[tile]: risk for tile, risk in pending["steps"]}
+                memory["stats"]["marked"] = memory["stats"].get("marked", 0) + 1
+                memory["stats"]["risky"] = memory["stats"].get("risky", 0) + (
+                    1 if max(risk for _tile, risk in pending["steps"]) > min(risk for _tile, risk in pending["steps"]) else 0)
+            memory["stats"]["old"] += 1
+            return None
     best = None
     for plan in (memory["current"], memory["pending"]):
         if plan is None or not plan["steps"]:
             continue
         steps, kind = plan["steps"], plan["kind"]
-        if plan["root"] != state:
+        if not _plan_same(plan["root"], state, cloudy):
             # the game is not where this plan expected it: does the plan still hold from here?
             lived, cleared, risk = planner.replay(state, steps)
             if cleared and risk == 0.0:
@@ -6257,6 +7723,11 @@ def plan_pacman_step(game, now):
         memory["stats"]["old"] += 1
         return None
     _rank, steps, kind = best
+    if cloudy and not _cloud_step_safe(planner, state, steps[0]):
+        memory["current"] = None
+        memory["stats"]["old"] += 1
+        memory["stats"]["unsafe"] = memory["stats"].get("unsafe", 0) + 1
+        return None
     memory["current"] = {"root": None, "steps": steps[1:], "kind": kind}
     memory["stats"]["planned"] += 1
     memory["by_plan"] = True
@@ -6283,12 +7754,25 @@ def plan_pacman_after(game, now, moved_to):
         if current["kind"] == "clear" and current["steps"] and not PACMAN_PLANNER_IMPROVE:
             return
     worker = game._plan_worker
+    cloudy = memory["model"].cloud is not None
     if worker is not None:
-        worker.ask(memory["model"], planner.rel, expected)  # the answer is picked up at his next decision
+        if cloudy:
+            worker.ask(memory["model"], planner.rel, (memory["state"], memory["track"], planner.idx[moved_to]), expected)
+        else:
+            worker.ask(memory["model"], planner.rel, expected)  # the answer is picked up at his next decision
         return
     if game._plan_live:
         return
-    kind, steps, nodes = planner.plan(expected, PACMAN_PLANNER_NODES)
+    if cloudy:
+        kind, steps, nodes = planner.plan_cloud(memory["state"], memory["track"], planner.idx[moved_to])
+    elif memory["model"].weights is not None:
+        if PACMAN_PLANNER_WORKERS > 1:
+            kind, steps, nodes = planner.plan_split(
+                expected, PACMAN_PLANNER_FITTED_NODES, PACMAN_PLANNER_FITTED_CAP, PACMAN_PLANNER_WORKERS)
+        else:
+            kind, steps, nodes = planner.plan(expected, PACMAN_PLANNER_FITTED_NODES, None, PACMAN_PLANNER_FITTED_CAP)
+    else:
+        kind, steps, nodes = planner.plan(expected, PACMAN_PLANNER_NODES)
     stats = memory["stats"]
     stats["plans"] += 1
     stats["nodes"] += nodes
@@ -6716,6 +8200,7 @@ class Game:
                 continue  # can't walk back into the house once released
             if self.ghost_autoplay_weights is None and options:
                 self._record_player_ghost_move(now, self.ghost_position, self.ghost_direction, direction, options)
+            _cloud_observe(self, now, direction)
             self.player_ghost_seen.append((self.ghost_position, candidate, self.pacman_position, now < self.power_until))
             self.ghost_prev_position = self.ghost_position
             self.ghost_position = candidate
@@ -6970,6 +8455,7 @@ class Game:
             decision_started = time.perf_counter()
         # The whole-game plan decides when there is one (see PACMAN_PLANNER);
         # otherwise he decides move by move, as he always has.
+        self._pg_idle = bool(hold_until)  # the idle-ghost rule is in force: no plan against the fitted model
         next_position = self._planned_step(now)
         if next_position is None:
             next_position = choose_pacman_step(

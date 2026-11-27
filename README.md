@@ -62,6 +62,34 @@ the game starts. None of them changes a rule of the game - only how he decides.
   in 78 of 208 games (37.5%), against 0 of the same 208 without the planner.
   Against the saved ghosts that play more like a person the planner stays
   off and the results are unchanged.
+- `PACMAN_CLOUD` (default 1): the cloud of likely ghosts, for when your ghost
+  is not playing as a plain chaser. A person's ghost cannot be forecast as
+  one line: in your recorded games the best single guess at where your ghost
+  will be is within 2 tiles 78% of the time after 4 of its moves and only
+  44% after 12. What can be had honestly is the odds of each way you might
+  go - from what is on screen now and two moves earlier, and from timing
+  (you turn round about 2-3 ghost moves after Pac-Man does). Of eight ghosts
+  drawn from those odds, yours is within 2 tiles of at least one 96%, 87%
+  and 81% of the time after 4, 8 and 12 moves.
+  So after each of his moves a second process runs every line of play open
+  to him for his next 12 moves against 16 such ghosts (`PACMAN_CLOUD_K`,
+  `PACMAN_CLOUD_DEPTH`) and the classic ghosts' expected moves. At his next
+  decision each way open is marked down by the share of the 16 that catch
+  him down it (`PACMAN_CLOUD_WEIGHT`, default 1200). He still decides move
+  by move as before; the marks are one more thing he weighs. It does not
+  read your keys - only what is on screen.
+  The odds come from `player_ghost_versions/timed_odds_lite.json`, fitted to
+  your recorded games. Without that file, or if the second process cannot
+  start, he plays as before. Set `PACMAN_CLOUD=0` to switch it off.
+  Measured over 300 simulated games each, with the odds fitted on other
+  games than the stand-in's: against a stand-in that turns, hesitates and
+  doubles back at your own rates, 62.7% -> 66.6% of the maze eaten and
+  caught after 79 s instead of 66 s (on a second set of 300 games: 59.3% ->
+  64.6%, 74 s instead of 60 s); against a sharper "pouncing" ghost 54.3% ->
+  57.4%; against the older stand-in no change (61.1% -> 61.4%). He still
+  hardly ever clears the maze against any of them. Letting the search steer
+  him directly, in place of marking his own choices, was tried first and was
+  10 points worse.
 - `PACMAN_SURE_KILL` (default 1): the certain kill. While a power pellet is
   working, your ghost walks at about two thirds of his speed, so each step he
   takes towards it closes the gap whatever it does. When the power time left
